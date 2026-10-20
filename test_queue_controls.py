@@ -1,4 +1,5 @@
 import base64
+from contextlib import closing
 import http.client
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from companion import CommandJournal,CompanionServer
 from desktop_runtime import change_queued_message,queue_photo_message,QueueNotClaimed
 from questions import answer_envelope,replies
 from runtime import RuntimeUnavailable
+from promotions import QueuePromotions
 from test_companion import make_history,CHAT
 
 
@@ -47,14 +49,52 @@ class QueueProtocolTests(unittest.TestCase):
 
 
 
-    def test_unguarded_queue_mutations_reject_before_read_write_or_process_creation(self):
-        # This fake would return old text from list and edit it before delete/update.
-        # Without a native content precondition even a second list cannot fix it.
-        original=self.queued.copy()
+    def test_edit_keeps_identity_and_photo_and_delete_uses_only_the_verified_entry(self):
+        changes=QueuePromotions(Path(self.temp.name)/'changes.sqlite')
+        result=change_queued_message(CHAT,self.item,'Edited',executable='/test/codex',client_factory=self.client,recovery=changes)
+        self.assertEqual(result['state'],'updated')
+        self.assertEqual([m for m,_ in self.calls],['thread/queue/list','thread/queue/update'])
+        self.assertEqual(self.calls[-1][1]['input'][1],self.queued['input'][1])
+        saved=changes.pending(CHAT,lambda *_:False,str)
+        self.assertEqual(saved[0]['text'],'Original');self.assertTrue(saved[0]['confirmed']);self.assertEqual(saved[0]['kind'],'edit')
+        changes.dismiss(CHAT,saved[0]['id']);self.assertEqual(changes.pending(CHAT,lambda *_:False,str),[])
+        result=change_queued_message(CHAT,self.item,None,executable='/test/codex',client_factory=self.client,recovery=changes)
+        self.assertEqual(result['state'],'deleted');self.assertEqual(changes.pending(CHAT,lambda *_:False,str)[0]['title'],'Deleted queued message')
+
+    def test_a_changed_native_item_is_rejected_before_update_or_delete(self):
+        self.queued['input'][0]['text']='Edited on the Mac'
         for message in ['Edited',None]:
-            with self.assertRaisesRegex(QueueNotClaimed,'concurrent edit'):
+            with self.assertRaisesRegex(QueueNotClaimed,'edited'):
                 change_queued_message(CHAT,self.item,message,executable='/test/codex',client_factory=self.client)
-            self.assertEqual(self.calls,[]);self.assertEqual(self.queued,original)
+        self.assertEqual([m for m,_ in self.calls],['thread/queue/list','thread/queue/list'])
+
+    def test_unverified_mutation_retains_recovery_without_claiming_success(self):
+        changes=QueuePromotions(Path(self.temp.name)/'changes.sqlite')
+        base=self.client
+        class LostAcknowledgement(base):
+            def call(self,method,params):
+                result=super().call(method,params)
+                if method=='thread/queue/update':result['queuedSubmission']['clientUserMessageId']='wrong-identity'
+                return result
+        with self.assertRaises(RuntimeUnavailable):change_queued_message(CHAT,self.item,'Edited',executable='/test/codex',client_factory=LostAcknowledgement,recovery=changes)
+        saved=changes.pending(CHAT,lambda *_:False,str)[0]
+        self.assertFalse(saved['confirmed']);self.assertEqual(saved['text'],'Original')
+        class MalformedAcknowledgement(base):
+            def call(self,method,params):
+                return {'queuedSubmission':[]} if method=='thread/queue/update' else super().call(method,params)
+        with self.assertRaises(RuntimeUnavailable):change_queued_message(CHAT,self.item,'Edited',executable='/test/codex',client_factory=MalformedAcknowledgement,recovery=changes)
+
+    def test_old_confirmed_backups_expire_without_dropping_uncertain_versions_or_photos(self):
+        changes=QueuePromotions(Path(self.temp.name)/'changes.sqlite')
+        photo=Path(self.temp.name)/('a'*32+'.jpg');photo.write_bytes(b'protected photo')
+        item={**self.item,'photos':[str(photo)]}
+        old=changes.capture_change(CHAT,item,'delete');changes.stage(old,'deleted')
+        unknown=changes.capture_change(CHAT,item,'edit');changes.stage(unknown,'change_unknown')
+        with closing(sqlite3.connect(changes.path)) as db,db:db.execute('UPDATE promotions SET created=0')
+        changes.capture_change(CHAT,item,'edit')
+        saved=changes.pending(CHAT,lambda *_:True,str)
+        self.assertNotIn(old,[q['id'] for q in saved]);self.assertIn(unknown,[q['id'] for q in saved])
+        self.assertTrue(photo.exists());self.assertEqual(next(q for q in saved if q['id']==unknown)['photos'][0]['id'],'a'*32)
 
 
 class QueueRouteTests(unittest.TestCase):
@@ -90,6 +130,8 @@ class QueueRouteTests(unittest.TestCase):
     def command(self):return {'command_id':'queue-request-12345678','thread_id':CHAT,'queue_id':'queued-1','revision':self.history.pending_instructions(CHAT)[0]['revision'],'message':'Edited'}
 
     def test_edit_is_revision_guarded_authenticated_and_idempotent(self):
+        item=self.history.pending_instructions(CHAT)[0]
+        self.assertTrue(item['can_steer'] and item['can_edit'] and item['can_delete']);self.assertEqual(item['controls_reason'],'')
         payload=self.command();self.assertEqual(self.request('edit',payload,False)[0],403);self.assertEqual(self.request('edit',{**payload,'revision':'0'*64})[0],409);self.assertEqual(self.calls,[])
         payload['command_id']='valid-edit-request-123';self.assertEqual(self.request('edit',payload)[0],200);self.assertEqual(self.request('edit',payload)[0],200);self.assertEqual(len(self.calls),1)
         self.assertEqual(self.history.pending_instructions(CHAT)[0]['editable_text'],'Edited')

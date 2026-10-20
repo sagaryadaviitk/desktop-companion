@@ -422,11 +422,11 @@ class History:
                 continue
             client=queued_input.get('client_id')
             text,photos,supported=self.queued_content(content,thread_id)
-            plain=isinstance(client,str) and bool(THREAD_ID.fullmatch(client)) and supported
+            plain=isinstance(client,str) and bool(THREAD_ID.fullmatch(client)) and supported and bool(text.strip() or photos) and len(text)<=8000
             answers=question_replies(text)
             pending.append({"id": row["id"], "text": redact(text)[:8000], "timestamp": row["created_at_ms"],
-                            'photos':photos,'attachment_count':sum(1 for part in content if isinstance(part,dict) and part.get('type') in ('image','localImage')),'revision':hashlib.sha256(row['payload_json'].encode()).hexdigest(),'can_steer':False,
-                            'can_edit':False,'can_delete':False,'controls_reason':'Manage this queue on your Mac. This desktop version cannot protect concurrent edits from mobile.',
+                            'photos':photos,'attachment_count':sum(1 for part in content if isinstance(part,dict) and part.get('type') in ('image','localImage')),'revision':hashlib.sha256(row['payload_json'].encode()).hexdigest(),'can_steer':plain,
+                            'can_edit':plain and len(answers)<=1 and redact(text)==text,'can_delete':plain,'controls_reason':'' if plain else 'This message includes content that needs the Mac app.',
                             'editable_text':redact(answers[0]['answer'] if len(answers)==1 else text)[:8000],
                             'answer':bool(answers)})
         return pending
@@ -452,7 +452,7 @@ class History:
             raise ValueError('This queued message includes attachments that need the desktop.')
         client=value.get('client_id');photos=[str(self.photos.root/(photo['id']+'.jpg')) for photo in photo_refs]
         if len(photos)>PhotoStore.MAX_PHOTOS:raise ValueError('Too many photos.')
-        if not isinstance(client,str) or not THREAD_ID.fullmatch(client) or not 1<=len(text.strip())<=8000:raise ValueError('Unsupported queued message.')
+        if not isinstance(client,str) or not THREAD_ID.fullmatch(client) or len(text.strip())>8000 or not (text.strip() or photos):raise ValueError('Unsupported queued message.')
         return {'id':row['id'],'text':text,'photos':photos,'image_urls':[part['image_url'] for part in content if part.get('type')=='image'],'source_photos':[(part['type'],part.get('path') if part['type']=='localImage' else part.get('image_url')) for part in content if part['type'] in ('localImage','image')],'client_id':client,'revision':hashlib.sha256(row['payload_json'].encode()).hexdigest()}
 
     def has_client_receipt(self,thread_id,client_id):
@@ -970,6 +970,7 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             result=self.server.bridge.send(thread_id,envelope)
                             result['message']='Reply queued. Direct delivery to this active turn is unavailable; it may wait until the turn finishes.'
+                    except QueueNotClaimed as error:raise ControlError(str(error),retryable=True) from error
                     except RuntimeUnavailable as error:raise ControlError(str(error),uncertain=True) from error
                     return result
                 try:result=self.server.journal.execute(identity,canonical,send_answer)
@@ -980,19 +981,20 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(identity,str) or not THREAD_ID.fullmatch(identity) or not isinstance(revision,str) or not re.fullmatch(r'[a-f0-9]{64}',revision) or not isinstance(request_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,100}',request_id):raise ValueError('Invalid queue request.')
                 if thread['archived'] or not self.server.bridge.availability()['available']:return self.reply(409,{'error':'Queue changes are unavailable for this chat.'})
                 editing=self.path.endswith('/edit');message=payload.get('message')
-                if editing and (not isinstance(message,str) or not 1<=len(message.strip())<=8000):raise ValueError('Add a message before saving.')
+                if editing and (not isinstance(message,str) or len(message.strip())>8000):raise ValueError('Keep the message under 8,000 characters.')
                 def change_queue():
                     try:
                         item=self.server.history.queue_item(thread['id'],identity)
                         if item['revision']!=revision:raise ControlError('This queued message changed. Refresh before editing or deleting it.',retryable=True)
                         updated=message.strip() if editing else None
                         if editing:
+                            if not updated and not item.get('photos'):raise ControlError('Add a message before saving.')
                             answers=question_replies(item['text'])
                             if len(answers)>1:raise ControlError('Edit this multi-question reply on your Mac.')
                             if answers:
                                 if len(updated)>4000:raise ControlError('Keep your answer under 4,000 characters.')
                                 updated=answer_envelope({'id':answers[0]['questionItemId'],'title':answers[0]['question']},updated)
-                        return change_queued_message(thread['id'],item,updated,executable=self.server.bridge.executable)
+                        return change_queued_message(thread['id'],item,updated,executable=self.server.bridge.executable,recovery=getattr(self.server.runtime,'promotions',None))
                     except KeyError:raise ControlError('This message is no longer queued. Refresh the chat.')
                     except QueueNotClaimed as error:raise ControlError(str(error),retryable=True) from error
                     except RuntimeUnavailable as error:raise ControlError(str(error),uncertain=True) from error
@@ -1077,6 +1079,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(409,{'error':'The desktop turn changed or ended. Refresh to use its current controls. Your draft has not been sent.'})
                 def action():
                     try:return self.server.runtime.steer(thread_id,message,expected,photos=photo_paths) if photo_paths else self.server.runtime.steer(thread_id,message,expected)
+                    except QueueNotClaimed as error:raise ControlError(str(error),retryable=True) from error
                     except RuntimeUnavailable as error:raise ControlError(str(error),uncertain=True) from error
             elif mode=='send':
                 if not self.server.runtime or not self.server.bridge.availability()['available']:

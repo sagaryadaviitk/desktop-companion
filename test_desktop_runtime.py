@@ -13,26 +13,24 @@ from promotions import QueuePromotions
 
 
 class QueueClaimTests(unittest.TestCase):
-    def setUp(self):
-        self.calls=[];self.deleted=True
-        self.item={'id':'queue-1','text':'Exact original','client_id':'client-1'}
-        self.queued={'id':'queue-1','input':[{'type':'text','text':'Exact original','text_elements':[]}],'clientUserMessageId':'client-1'}
-        outer=self
-        class Client:
-            def __init__(self,command,timeout):outer.command=command
+    def test_claim_uses_only_queue_list_and_delete_with_explicit_identity_verification(self):
+        calls=[];queued={'id':'queued','clientUserMessageId':'client','input':[{'type':'text','text':'Original'}]}
+        class QueueClient:
+            def __init__(self,*args,**kwargs):pass
             def __enter__(self):return self
             def __exit__(self,*_):pass
             def call(self,method,params):
-                outer.calls.append((method,params))
-                if method=='thread/queue/list':return {'data':[outer.queued]}
-                if method=='thread/queue/delete':return {'deleted':outer.deleted}
+                calls.append((method,params))
+                if method=='thread/queue/list':return {'data':[queued]}
+                if method=='thread/queue/delete':return {'deleted':True}
                 raise AssertionError('Only queue operations are allowed')
-        self.client=Client
-
-    def claim(self):return claim_queued_message('chat-1',self.item,self.client,'/test/codex')
-
-
-
+        item={'id':'queued','client_id':'client','text':'Original'}
+        result=claim_queued_message('chat',item,QueueClient,'/fake/codex')
+        self.assertEqual(result['message']['context']['prompt'],'Original')
+        self.assertEqual([method for method,_ in calls],['thread/queue/list','thread/queue/delete'])
+        queued['input'][0]['text']='Changed on Mac';calls.clear()
+        with self.assertRaises(QueueNotClaimed):claim_queued_message('chat',item,QueueClient,'/fake/codex')
+        self.assertEqual([method for method,_ in calls],['thread/queue/list'])
 
     def test_photo_queue_uses_only_add_and_verifies_exact_client_and_content(self):
         calls=[]
@@ -217,16 +215,17 @@ class DesktopRuntimeTests(unittest.TestCase):
         self.assertEqual(len([r for r in self.requests if r['method']=='thread-follower-command-approval-decision']),1)
 
     def promotion_runtime(self):
+        item={'id':'queued-1','text':'Queued task','client_id':'original-client-1','revision':'a'*64}
         def read_queue(*_):
             if not self.queued:raise KeyError('gone')
-            return {'id':'queued-1'}
+            return dict(item)
         self.runtime.queue_reader=read_queue;self.runtime.receipt_reader=lambda *_:False
         self.runtime.promotions=QueuePromotions(self.home/'promotions.sqlite')
         def claim(thread,item):
             self.queued=False
             return {'message':{'context':{'prompt':item['text']}}}
         self.runtime.queue_claimer=claim
-        return {'id':'queued-1','text':'Queued task','client_id':'original-client-1','revision':'a'*64}
+        return item
 
 
 
@@ -240,21 +239,65 @@ class DesktopRuntimeTests(unittest.TestCase):
         self.assertNotIn('thread-follower-steer-turn',[r['method'] for r in self.requests])
         self.assertEqual(result['client_id'],self.atomic_calls[-1][3]['client_id'])
 
-    def test_missing_atomic_channel_disables_steer_and_never_uses_unbound_follower(self):
+    def use_follower(self):
         self.runtime.shared.present=lambda:False
         self.runtime.shared.capabilities=lambda _: {'steer':False}
-        self.assertFalse(self.runtime.capabilities('chat-1')['steer'])
-        with self.assertRaises(RuntimeUnavailable):self.runtime.steer('chat-1','Keep this turn','turn-1')
-        self.assertEqual(self.atomic_calls,[])
+
+    def test_follower_steer_is_available_without_a_shared_daemon_and_reports_native_rollover(self):
+        self.use_follower();self.assertTrue(self.runtime.capabilities('chat-1')['steer'])
+        self.wrong_turn=True
+        result=self.runtime.steer('chat-1','Keep this fix small','turn-1',photos=['/private/photo.jpg'])
+        self.assertEqual(result['state'],'steered');self.assertEqual(result['turn_id'],'different-turn');self.assertTrue(result['turn_changed'])
+        requests=[r for r in self.requests if r['method']=='thread-follower-steer-turn']
+        self.assertEqual(len(requests),1);request=requests[0]
+        self.assertEqual(request['version'],1);self.assertEqual(request['targetClientId'],'desktop-owner')
+        self.assertEqual(request['params']['clientUserMessageId'],result['client_id'])
+        self.assertEqual(request['params']['input'][-1],{'type':'localImage','path':'/private/photo.jpg'})
+        self.assertNotIn('approvalPolicy',request['params']);self.assertEqual(self.atomic_calls,[])
+
+    def test_queue_promotion_removes_original_before_steering_and_reuses_client_identity(self):
+        self.use_follower();item=self.promotion_runtime()
+        self.assertTrue(self.runtime.capabilities('chat-1')['queue_steer'])
+        result=self.runtime.promote_queued('chat-1',item,'turn-1')
+        self.assertEqual(result['state'],'steered');self.assertFalse(self.queued)
+        mutations=[r for r in self.requests if r['method'] in ('thread-follower-remove-queued-message','thread-follower-steer-turn')]
+        self.assertEqual([r['method'] for r in mutations],['thread-follower-steer-turn'])
+        self.assertEqual(result['client_id'],item['client_id']);self.assertEqual(self.runtime.queue_recovery('chat-1',str),[])
+
+    def test_changed_queue_item_is_rejected_before_claim(self):
+        item=self.promotion_runtime();self.runtime.queue_reader=lambda *_:{**item,'revision':'new'}
+        with self.assertRaises(QueueNotClaimed):self.runtime.promote_queued('chat-1',item,'turn-1')
+        self.assertTrue(self.queued);self.assertNotIn('thread-follower-steer-turn',[r['method'] for r in self.requests])
+
+    def test_changed_removed_text_is_saved_without_sending_the_old_version(self):
+        item=self.promotion_runtime()
+        def changed(*_):
+            self.queued=False;return {'message':{'context':{'prompt':'Actual edited text'}}}
+        self.runtime.queue_claimer=changed
+        with self.assertRaises(RuntimeUnavailable):self.runtime.promote_queued('chat-1',item,'turn-1')
+        self.assertEqual(self.runtime.queue_recovery('chat-1',str)[0]['text'],'Actual edited text')
         self.assertNotIn('thread-follower-steer-turn',[r['method'] for r in self.requests])
 
-    def test_queue_promotion_rejects_before_claim_even_with_valid_snapshot(self):
-        item=self.promotion_runtime();claimed=[]
-        self.runtime.queue_claimer=lambda *_:claimed.append(True)
-        with self.assertRaises(QueueNotClaimed):self.runtime.promote_queued('chat-1',item,'turn-1')
-        self.assertTrue(self.queued);self.assertEqual(claimed,[])
-        self.assertEqual(self.runtime.queue_recovery('chat-1',str),[])
-        self.assertFalse(self.runtime.capabilities('chat-1')['queue_steer'])
+    def test_turn_ending_after_removal_keeps_recovery_without_starting_a_new_turn(self):
+        item=self.promotion_runtime()
+        def ended(*_):
+            self.queued=False;self.live_override={'turn_id':'turn-1','status':'completed'}
+            return {'message':{'context':{'prompt':item['text']}}}
+        self.runtime.queue_claimer=ended
+        with self.assertRaises(RuntimeUnavailable):self.runtime.promote_queued('chat-1',item,'turn-1')
+        self.assertEqual(self.runtime.queue_recovery('chat-1',str)[0]['text'],item['text'])
+        self.assertNotIn('thread-follower-start-turn',[r['method'] for r in self.requests])
+        self.assertNotIn('thread-follower-steer-turn',[r['method'] for r in self.requests])
+
+    def test_unknown_steer_after_claim_is_saved_and_never_automatically_replayed(self):
+        self.use_follower();item=self.promotion_runtime();self.fail_after_claim=True
+        with self.assertRaises(RuntimeUnavailable):self.runtime.promote_queued('chat-1',item,'turn-1')
+        self.assertFalse(self.queued);self.assertEqual(self.runtime.queue_recovery('chat-1',str)[0]['text'],item['text'])
+        self.assertEqual(len([r for r in self.requests if r['method']=='thread-follower-steer-turn']),1)
+        for body in [None,[],{'result':[]},{'result':{'turnId':''}}]:
+            class Malformed:
+                def call(self,*args,**kwargs):return {'handledByClientId':'owner','result':body}
+            with self.assertRaises(RuntimeUnavailable):self.runtime._steer(Malformed(),'owner','chat-1',self.thread,'Text',[],'client','turn-1')
 
 
 if __name__=='__main__':unittest.main()

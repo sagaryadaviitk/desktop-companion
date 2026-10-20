@@ -525,6 +525,18 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(self.request('/api/command','POST',headers={'X-Companion-CSRF':self.server.csrf},body=json.dumps(payload))[0],409)
         send.assert_not_called()
 
+    def test_known_steer_preflight_rejection_is_retryable_but_not_an_unknown_delivery(self):
+        from desktop_runtime import QueueNotClaimed
+        payload={'thread_id':CHAT,'message':'correction','command_id':'preflight-retry-123456','mode':'steer','expected_turn_id':'live-turn'}
+        runtime=SimpleNamespace(execution_state=lambda _: {'status':'working','turn_id':'live-turn'},steer=lambda *_:None)
+        with patch.object(self.server,'runtime',runtime),patch.object(self.server.bridge,'availability',return_value={'available':True}),patch.object(runtime,'steer',side_effect=[QueueNotClaimed('No message submitted'),{'state':'steered'}]) as steer:
+            headers={'X-Companion-CSRF':self.server.csrf}
+            status,_,body=self.request('/api/command','POST',headers=headers,body=json.dumps(payload))
+            self.assertEqual(status,409);result=json.loads(body)
+            self.assertEqual(result['state'],'rejected');self.assertTrue(result['retryable'])
+            self.assertEqual(self.request('/api/command','POST',headers=headers,body=json.dumps(payload))[0],200)
+            self.assertEqual(steer.call_count,2)
+
     def test_idle_send_is_direct_deduplicated_and_never_queued(self):
         payload={'thread_id':CHAT,'message':'Next task','command_id':'direct-send-request-1234','mode':'send'}
         runtime=SimpleNamespace(send_now=lambda *_:None)

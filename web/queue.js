@@ -13,7 +13,7 @@ window.CompanionQueue={install({request,steer,refresh,onResult,isConnected,getCh
   if(!isConnected()||busy.has(item.id))return;
   editing={item,thread:data.id,operation};input.value=operation==='edit'?item.editable_text:display(item);input.readOnly=operation==='delete';input.maxLength=item.answer?4000:8000;
   el('queue-heading').textContent=operation==='edit'?(item.answer?'Edit queued reply':'Edit queued message'):'Delete queued message?';
-  el('queue-help').textContent=operation==='edit'?'Save changes to this message in the desktop queue. Any attached photos stay with it.':'Remove this message from the queue before it is sent.';
+  el('queue-help').textContent=operation==='edit'?'Save this message in place and keep its photos. Avoid editing it on your Mac at the same time.':'Remove this message before it is sent. A copy will be kept under Previous queue versions.';
   el('queue-edit-photos').replaceChildren(photos(item.photos));error.textContent='';save.textContent=operation==='edit'?'Save changes':'Delete message';save.dataset.kind=operation;
   save.disabled=false;el('queue-cancel').disabled=false;dialog.showModal();if(operation==='edit')input.focus();
  }
@@ -31,7 +31,7 @@ window.CompanionQueue={install({request,steer,refresh,onResult,isConnected,getCh
    if(total)row.append(make('span',`${total} photo${total===1?'':'s'} attached${total>(item.photos?.length||0)?' · preview available on Mac':''}`,'queue-attachment-note'));
    const actions=make('div','','queue-actions');
    for(const [action,label,enabled] of [['steer','Steer now',data.control?.live?.queue_steer&&item.can_steer],['edit','Edit',item.can_edit],['delete','Delete',item.can_delete]]){
-    const button=make('button',label,'quiet-button queue-action');button.type='button';button.dataset.action=action;button.setAttribute('aria-label',`${label} queued message`);button.disabled=!isConnected()||!enabled||busy.has(item.id);button.title=enabled?label:'This action needs the connected desktop or supported message content.';
+    const button=make('button',label,'quiet-button queue-action');button.type='button';button.dataset.action=action;button.setAttribute('aria-label',`${label} queued message`);button.disabled=!isConnected()||data.control?.available===false||!enabled||busy.has(item.id);button.title=enabled?label:'This action needs the connected desktop or supported message content.';
     button.addEventListener('click',async()=>{if(button.disabled)return;if(action!=='steer'){open(item,data,action);return;}button.disabled=true;button.textContent='Steering…';busy.add(item.id);try{await steer(item,data);}catch(e){onResult(e.message);}finally{busy.delete(item.id);await refresh();}});actions.append(button);
    }
    if(item.controls_reason)row.append(make('p',item.controls_reason,'panel-help'));row.append(actions);content.append(row);
@@ -40,7 +40,7 @@ window.CompanionQueue={install({request,steer,refresh,onResult,isConnected,getCh
  }
  form.addEventListener('submit',async event=>{
   event.preventDefault();if(!editing||busy.size||!isConnected())return;
-  const state=editing,{item,thread,operation}=state,message=input.value.trim();if(operation==='edit'&&!message){error.textContent='Add a message before saving.';return;}
+  const state=editing,{item,thread,operation}=state,message=input.value.trim();if(operation==='edit'&&!message&&!item.photos?.length){error.textContent='Add a message before saving.';return;}
   const current=getChat();if(current?.id!==thread){error.textContent='Return to this chat before saving.';return;}
   const live=current.pending_instructions?.find(q=>q.id===item.id);
   if(!live||live.revision!==item.revision){error.textContent='This message changed or left the queue. Your edit is kept here; copy it before closing.';return;}

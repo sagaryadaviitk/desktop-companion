@@ -64,3 +64,21 @@ test('an explicit unchanged retry retains its original request, mode and turn af
  f.context.deliveryMode='queue';f.context.selectedData.control.live={send_now:true,execution:{turn_id:'another-turn'}};await f.submit();
  assert.equal(f.calls.length,2);assert.deepEqual(f.calls[1],f.calls[0]);assert.equal(f.calls[1].mode,'steer');assert.equal(f.calls[1].expected_turn_id,'original-turn');
 });
+
+test('photo-only queued captions can be saved without losing their photos',async()=>{
+ const f=queueFixture();await walk(f.rendered).find(n=>n.dataset.action==='edit').emit('click');
+ f.doc.getElementById('queue-message').value='';await f.doc.getElementById('queue-form').emit('submit');
+ assert.equal(f.calls.length,1);assert.equal(f.calls[0].payload.message,'');assert.equal(f.calls[0].payload.queue_id,'queue-1');
+});
+test('a known rejected Steer gets a fresh explicit attempt against the refreshed turn',async()=>{
+ let count=0,fail=true;
+ const f=composerFixture(async()=>{if(fail)throw Object.assign(Error('No message submitted'),{status:409,result:{state:'rejected',retryable:true}});return {state:'steered'};});
+ f.context.crypto.randomUUID=()=>`new-request-${++count}`;f.context.deliveryMode='steer';f.context.selectedData.control.live={steer:true,execution:{turn_id:'old-turn'}};
+ await f.submit();assert.equal(f.context.commandAttempts.size,0);fail=false;f.context.selectedData.control.live.execution.turn_id='new-turn';await f.submit();
+ assert.equal(f.calls[1].expected_turn_id,'new-turn');assert.notEqual(f.calls[0].command_id,f.calls[1].command_id);
+});
+test('a read-only viewer never enables restored queue mutations',async()=>{
+ const f=queueFixture();f.data.control.available=false;const rendered=f.ui.render(f.data);
+ for(const button of walk(rendered).filter(n=>n.dataset.action)){assert.equal(button.disabled,true);await button.emit('click');}
+ assert.equal(f.calls.length,0);assert.equal(f.doc.getElementById('queue-dialog').open,false);
+});
