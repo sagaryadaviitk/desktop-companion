@@ -61,6 +61,9 @@ def doctor(root=ROOT,*,check_native=True):
 def bundle(output,root=ROOT):
     root=Path(root).resolve();output=Path(output).resolve()
     files=[root/name for name in MODULES]+[root/name for name in ('.gitignore','config.example.json','README.md','SETUP.md')]
+    for name in ('.gitattributes','AGENTS.md','CONTRIBUTING.md','.github/workflows/checks.yml'):
+        path=root/name
+        if path.exists() or path.is_symlink():files.append(path)
     for directory,patterns in [('web',('*.js','*.css','*.html')),('native',('*.swift',)),
                                ('cloudflare_fallback',('worker.mjs.template','offline.html','build.py','README.md'))]:
         for pattern in patterns:files.extend((root/directory).glob(pattern))

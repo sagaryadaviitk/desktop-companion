@@ -4,7 +4,7 @@ This repository contains the Python desktop bridge, static mobile web UI, Swift 
 
 ## Shared work across Macs
 
-- Inspect `git status` and the current branch before editing. Preserve other work and local configuration. Use a feature branch for each independent change; merge through a reviewed pull request.
+- Inspect `git status` and the current branch before editing. Preserve other work and local configuration. Use a separate feature worktree when the installed service uses this checkout; merge through a reviewed pull request.
 - Pull `main` with `git pull --ff-only` from a clean checkout. Do not reset another Mac's work, force-push shared history, or automatically deploy a remote commit.
 - Commit explicit source paths. Never commit `.state/`, photos, conversations, logs, pairing/browser records, credentials, `.env` files, compiled apps, archives, or `config.local.json`. Tests use fake credentials and temporary stores.
 - Each Mac has its own desktop sign-in, history, app build, configuration, hostname/tunnel, and pairing. Git shares source, not active chat sessions or machine settings.

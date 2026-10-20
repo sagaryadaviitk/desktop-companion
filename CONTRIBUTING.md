@@ -26,12 +26,14 @@ The existing Mac can keep running from its current source folder. Do not move th
 
 Before switching branches or pulling, check for unfinished work with `git status --short`. If files are modified, finish/commit that work or choose a separate checkout before updating. Do not discard changes to make a pull succeed.
 
-From a clean checkout:
+Keep the installed checkout on `main`. Use a separate feature worktree so editing or switching branches does not change files used by the running Companion service. Do not run `manage.py setup` from a temporary feature worktree: each Mac has one installed service and one set of ports.
+
+Create the feature worktree from your clean installed checkout:
 
 ```sh
-git switch main
-git pull --ff-only
-git switch -c feature/chat-theme
+git fetch origin
+git worktree add -b feature/chat-theme ../desktop-companion-theme origin/main
+cd ../desktop-companion-theme
 ```
 
 Edit and test the change. For example, for a theme change:
