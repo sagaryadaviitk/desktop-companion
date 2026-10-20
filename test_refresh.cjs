@@ -6,7 +6,7 @@ const vm=require('node:vm');
 const source=fs.readFileSync(__dirname+'/web/refresh.js','utf8');
 
 function fixture(refresh=async()=>true){
-  const listeners={},nodes={},states=new Set(['ready']);let blocked=false,mobile=true;
+  const listeners={},nodes={},states=new Set(['ready']);let blocked=false,mobile=true,standalone=false;const haptics=[];
   class Element {
     constructor(){this.scrollTop=0;this.listeners={};this.attributes={};this.hidden=false;this.classList={toggle(){}};}
     addEventListener(name,callback){this.listeners[name]=callback;}
@@ -20,9 +20,9 @@ function fixture(refresh=async()=>true){
     querySelector:selector=>selector==='.topbar'?{getBoundingClientRect:()=>({bottom:53})}:states.has('dialog')?{}:null,
     addEventListener:(name,callback,options)=>{listeners[name]=callback;listeners[name+'Options']=options;}};
   const context={window:{},document,Element,setTimeout:()=>1,clearTimeout(){}};vm.runInNewContext(source,context);
-  const controller=context.window.CompanionRefresh.install({refresh,isMobile:()=>mobile});
+  const controller=context.window.CompanionRefresh.install({refresh,isMobile:()=>mobile,isStandalone:()=>standalone,haptic:kind=>haptics.push(kind)});
   function event(x=10,y=10,count=1,cancelable=true){return {target:nodes.panel,touches:Array.from({length:count},()=>({clientX:x,clientY:y})),cancelable,preventDefault(){this.prevented=true;}};}
-  return {listeners,nodes,states,controller,event,block:()=>blocked=true,desktop:()=>mobile=false};
+  return {listeners,nodes,states,controller,event,block:()=>blocked=true,desktop:()=>mobile=false,app:()=>standalone=true,haptics};
 }
 
 test('a downward pull at the panel top refreshes once on release and cancels a card click',async()=>{
@@ -80,4 +80,17 @@ test('an interrupted refresh recovers the button and keeps an actionable status'
   await f.controller.refresh();
   assert.equal(f.nodes['manual-refresh'].disabled,false);
   assert.equal(f.nodes['pull-refresh-label'].textContent,'Couldn’t refresh. Try again.');
+});
+
+test('Home Screen header pulls refresh at any reader position while browser-tab header pulls remain native',async()=>{
+ for(const standalone of [false,true]){
+  let count=0;const f=fixture(async()=>{count++;return true;});if(standalone)f.app();f.nodes.panel.scrollTop=800;
+  f.nodes.panel.closest=selector=>selector.startsWith('.topbar')?f.nodes.panel:null;
+  f.listeners.touchstart(f.event());const move=f.event(10,120);f.listeners.touchmove(move);await f.listeners.touchend(f.event());
+  assert.equal(count,standalone?1:0);assert.equal(move.prevented,standalone?true:undefined);
+  assert.deepEqual(f.haptics,standalone?['armed','complete']:[]);
+ }
+});
+test('refresh button requests start and completion feedback only for the explicit user refresh',async()=>{
+ const f=fixture();await f.nodes['manual-refresh'].listeners.click();assert.deepEqual(f.haptics,['start','complete']);
 });

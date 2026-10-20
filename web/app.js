@@ -101,7 +101,7 @@ function updateComposer(){
   const modelName=(currentStatus?.models||[]).find(item=>item.id===model)?.name||model;
   el('model-trigger').textContent=modelName&&modelName!=='Unknown'?modelName+' ⌄':'Model & controls ⌄';el('model-trigger').disabled=!selected;
   const count=input.value.length;el("composer-meta").hidden=count<7000;el("draft-count").textContent=count>=7000?`${count.toLocaleString()} / 8,000`:"";el("draft-count").classList.toggle("limit",count>=8000);
-  input.style.height="auto";input.style.height=Math.min(Math.max(50,input.scrollHeight),Math.min(160,window.innerHeight*.3))+"px";
+  CompanionShell.sizeInput(input);
   if(atBottom&&activeView==="conversation")jumpLatest();
 }
 function jumpLatest(){const panel=el("messages");if(conversationScroll)conversationScroll.bottom();else panel.scrollTop=panel.scrollHeight;conversationNeedsScroll=false;updateJump();scheduleMarkViewed();}
@@ -697,7 +697,7 @@ el("login-form").addEventListener("submit",async event=>{
   catch(error){el("login-error").textContent=error.message;}
   finally{el("login-submit").disabled=false;}
 });
-el('account-trigger').addEventListener('click',()=>el('account-dialog').showModal());
+el('account-trigger').addEventListener('click',()=>{el('reload-result').textContent='';el('refresh-help').textContent=CompanionShell.standalone()?'Tap ↻ to update without losing your draft. Pull down from the app header anywhere, or from a list/reader when it is at the top. Use Reload app for a full interface reload.':'Tap ↻ or pull down inside a list/reader at its top to update without losing your draft. Pulling from the header keeps the browser’s own refresh gesture. Use Reload app for a full interface reload.';el('account-dialog').showModal();});
 el('account-close').addEventListener('click',()=>el('account-dialog').close());
 if(window.CompanionHealth)healthFlow=CompanionHealth.install({api,getVersion:()=>authVersion});
 el('system-open').addEventListener('click',()=>{el('account-dialog').close();healthFlow?.open();});
@@ -761,7 +761,8 @@ el("composer").addEventListener("submit",async event=>{
   finally{sending=false;if(version===authVersion){renderMessages();updateComposer();await refreshChat(true);}}
 });
 el('connect-chat').addEventListener('click',async()=>{if(connectingChat||!selected)return;const target=selected;connectingChat=true;updateComposer();try{const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});if(target===selected){showCommandResult(result.message,true);await refreshChat();}}catch(error){if(target===selected)showCommandResult(error.message);}finally{connectingChat=false;updateComposer();}});
-if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>showCommandResult('Wait for the current operation to finish before reloading.')});
+if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else showCommandResult(message);}});
+el('app-reload').addEventListener('click',()=>updater?.reload());
 window.addEventListener('pageshow',event=>{if(event.persisted&&!document.body.classList.contains('signed-out'))refreshAll(true);});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&!document.body.classList.contains("signed-out")){scheduleMarkViewed();if(document.body.classList.contains("booting"))initialize();else refreshAll();}});
 window.addEventListener("online",()=>{if(document.body.classList.contains("booting"))initialize();else if(!document.body.classList.contains("signed-out"))refreshAll();});

@@ -35,7 +35,7 @@ from system_status import read_record
 
 ROOT = Path(__file__).resolve().parent
 STATIC_FILES={'/':('index.html','text/html'),'/style.css':('style.css','text/css'),'/theme.css':('theme.css','text/css'),
-              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation')}}
+              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation','shell')}}
 def web_build():
     digest=hashlib.sha256()
     for path in sorted((ROOT/'web').glob('*')):
