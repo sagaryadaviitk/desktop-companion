@@ -11,9 +11,9 @@ enum CompanionTheme {
                            blue: Double(value & 255) / 255, alpha: 1)
         })
     }
-    static let canvas = adaptive(0xf5f5f7, 0x181818)
+    static let canvas = adaptive(0xf5f5f7, 0x202020)
     static let surface = adaptive(0xffffff, 0x232323)
-    static let sidebar = adaptive(0xededf0, 0x1e1e1e)
+    static let sidebar = adaptive(0xededf0, 0x202020)
     static let line = adaptive(0xdedee1, 0x383838)
     static let action = adaptive(0x2864c7, 0x2d66c3)
     static let actionText = Color.white

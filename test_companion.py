@@ -60,6 +60,15 @@ class HistoryTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_TOOL_OUTPUT",serialized)
         self.assertEqual(thread["last_recorded_turn"]["status"],"completed")
 
+    def test_public_user_identity_reconciles_delivery_without_exposing_other_metadata(self):
+        identity='00000000-0000-4000-8000-000000000001'
+        with sqlite3.connect(self.root/'thread_history_1.sqlite') as db:
+            db.execute('UPDATE thread_items SET item_json=? WHERE item_id=?',(json.dumps({'content':[{'type':'text','text':'Hello'}],'clientId':identity,'private_context':'NEVER_EXPOSE'}),'1'))
+        thread=self.history.read_thread(CHAT)
+        self.assertEqual(thread['messages'][0]['client_id'],identity)
+        self.assertIsNone(thread['messages'][1]['client_id'])
+        self.assertNotIn('NEVER_EXPOSE',json.dumps(thread))
+
     def test_recent_uses_latest_recorded_action_including_tools_and_queued_input(self):
         with sqlite3.connect(self.root/'state_5.sqlite') as db:
             for identity in ('tool-chat','queued-chat','pinned-chat'):
@@ -360,6 +369,16 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(json.loads(first[2])["state"],"queued")
         self.assertEqual(send.call_count,1)
 
+    def test_confirmed_retry_recovers_receipt_even_after_turn_or_archive_state_changes(self):
+        payload={'thread_id':CHAT,'message':'Accepted earlier','mode':'send','command_id':'recover-confirmed-12345'}
+        receipt={'state':'sent','client_id':'original-client','turn_id':'original-turn'}
+        self.server.journal.execute(payload['command_id'],payload,lambda:receipt)
+        with patch.object(self.server.history,'read_thread',side_effect=AssertionError('Do not recheck mutable history')),patch.object(self.server.bridge,'send') as send:
+            code,_,body=self.request('/api/command','POST',headers={'X-Companion-CSRF':self.server.csrf},body=json.dumps(payload))
+            self.assertEqual(code,200);self.assertEqual(json.loads(body),receipt);send.assert_not_called()
+            changed={**payload,'message':'Different request'}
+            self.assertEqual(self.request('/api/command','POST',headers={'X-Companion-CSRF':self.server.csrf},body=json.dumps(changed))[0],400)
+
     def test_malformed_command_is_rejected_without_process_call(self):
         with patch.object(self.server.bridge,"send") as send:
             result=self.request("/api/command","POST",headers={"X-Companion-CSRF":self.server.csrf},body='["invalid"]')
@@ -376,6 +395,26 @@ class HttpTests(unittest.TestCase):
         for cursor in ["-1","0","nope","9223372036854775808","1%20OR%201=1"]:
             self.assertEqual(self.request(f"/api/chat?id={CHAT}&before={cursor}")[0],400)
         self.assertEqual(self.request(f"/api/chat?id={CHAT}&before=4")[0],200)
+
+    def test_chat_conditional_reads_skip_body_but_revalidate_changed_controls(self):
+        path='/api/chat?id='+CHAT
+        code,headers,body=self.request(path);self.assertEqual(code,200);self.assertIn('messages',json.loads(body))
+        code,_,body=self.request(path,headers={'If-None-Match':headers['ETag']})
+        self.assertEqual(code,304);self.assertEqual(body,b'')
+        with patch.object(self.server.bridge,'describe',return_value={'available':False,'reason':'Changed desktop connection'}):
+            self.assertEqual(self.request(path,headers={'If-None-Match':headers['ETag']})[0],200)
+
+    def test_conditional_chat_read_returns_fresh_execution_witness_without_retransmitting_history(self):
+        execution={'status':'working','turn_id':'active-turn','checked_at':1000}
+        runtime=SimpleNamespace(capabilities=lambda _:{'connected':True,'execution':dict(execution)})
+        path='/api/chat?id='+CHAT
+        with patch.object(self.server,'runtime',runtime),patch.object(self.server.bridge,'describe',return_value={'available':True}):
+            code,headers,_=self.request(path);self.assertEqual(code,200)
+            execution['checked_at']=2000
+            code,fresh,body=self.request(path,headers={'If-None-Match':headers['ETag']})
+            self.assertEqual(code,304);self.assertEqual(body,b'');self.assertEqual(fresh['X-Companion-Execution-Checked-At'],'2000')
+            execution['status']='idle';execution['turn_id']=None
+            self.assertEqual(self.request(path,headers={'If-None-Match':headers['ETag']})[0],200)
 
     def test_catalog_contains_empty_saved_projects(self):
         code,_,body=self.request()

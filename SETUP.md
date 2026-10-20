@@ -6,8 +6,8 @@ This is a local companion for the desktop app’s own chats. It uses macOS APIs 
 
 1. Install and sign in to the ChatGPT/Codex desktop app normally on the new Mac. Open a local chat once so its history exists.
 2. Install Python 3.11 or newer and Apple command-line tools. Install `cloudflared` only if this Mac needs remote phone access.
-3. Extract the source bundle to a permanent folder. Keep that folder in place: the control app and LaunchAgent refer to it.
-4. From the extracted `desktop_companion` folder, run:
+3. Clone the private repository using the [README installation steps](README.md#install-on-a-second-mac), or extract the source bundle to a permanent folder. Keep that folder in place: the control app and LaunchAgent refer to it.
+4. From that source folder (`desktop-companion` for Git, `desktop_companion` for a ZIP), run:
 
 ```sh
 python3 manage.py doctor
@@ -70,6 +70,6 @@ Node is needed only for JavaScript tests, not for running Companion. The allowli
 - `native/Appearance.swift`: shared native colors and material fallbacks. The control app follows the Mac appearance, with a sidebar override. macOS 26+ builds use Liquid Glass for navigation/secondary controls when available; older compiler/runtime versions retain solid controls.
 - `test_*`: isolated Python/JavaScript regression checks.
 
-App updates can change the local history schema or coordination protocol. Run the setup check and tests after an update; passing installation checks does not prove native app access while the Mac is locked. Stop/steer, approvals, and other capabilities remain gated by what the running desktop exposes.
+App updates can change the local history schema or coordination protocol. Run the setup check and tests after an update; passing installation checks does not prove native app access while the Mac is locked. Stop and runtime approvals still require the desktop. Send, Steer, and model controls require a verified live desktop connection; saved history alone does not enable them.
 
 Personal chats use this Mac’s own `~/Library/Application Support/Desktop Companion/Chats` folder. Saved project targets are discovered from this Mac’s desktop history and verified before the first question runs. Browser appearance preferences are local to each browser; chats, photo drafts, pairing, request journals, and private configuration are not carried in the source export.

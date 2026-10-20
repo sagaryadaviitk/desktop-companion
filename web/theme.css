@@ -16,7 +16,7 @@
 }
 :root[data-theme=dark] {
  color-scheme:dark;
- --bg:#181818;--sidebar:#1e1e1e;--panel:#232323;--raised:#303030;--field:#363636;
+ --bg:#202020;--sidebar:#202020;--panel:#232323;--raised:#303030;--field:#363636;
  --text:#ededed;--muted:#b4b4b4;--border:#383838;--border-strong:#5b5b5b;
  --accent:#ededed;--accent-soft:#343434;--accent-border:#555;--button:#2d66c3;--button-hover:#3673d6;--button-text:#fff;--focus:#8ab4f8;
  --bubble:#223d72;--bubble-text:#f1f5ff;--bubble-muted:#c5d6f2;--bubble-code:#192f58;--bubble-line:#58739f;
@@ -27,6 +27,7 @@
  --shadow:0 1px 3px #0000000d;--shadow-raised:0 12px 36px #00000040;--backdrop:#0000008c;
  --p0-bg:#2b3641;--p0:#b2cce3;--p1-bg:#33373b;--p1:#c3cbd3;--p2-bg:#293c35;--p2:#a0d1be;--p3-bg:#3d342a;--p3:#dec39c;--p4-bg:#3e2f33;--p4:#ddbac1;
 }
+.conversation,.reading-area,.messages,#sidebar,.home-screen {background:var(--bg)}
 body {background:var(--bg);color:var(--text);letter-spacing:-.01em}
 button,input,textarea,select {font-family:inherit;letter-spacing:inherit}
 button,summary,a,input,textarea,select {-webkit-tap-highlight-color:var(--accent-soft)}
@@ -292,3 +293,13 @@ dialog p,.panel-help {font-size:13px;line-height:1.65}
  #new-chat-create {box-shadow:none}
 }
 @media(max-width:360px) {#host-lid {display:none}.header-metrics,.header-metrics .usage-pill {gap:2px}.header-metrics #host-power {flex:none}.map-support .map-node {width:calc(33.333% - 5.34px)}.map-path .map-node-title {font-size:11px;letter-spacing:-.3px;overflow-wrap:normal}}
+/* The reader and chat list share one charcoal canvas. Color belongs to content. */
+.conversation-live {max-width:900px;margin:0 auto;min-width:0}
+.delivery-receipt {margin:0 0 16px auto;padding:16px 18px;border-radius:20px;max-width:92%;background:var(--bubble);color:var(--bubble-text);overflow-wrap:anywhere}
+.delivery-receipt p {white-space:pre-wrap;font-size:15px;line-height:1.65;margin:0 0 8px}
+.delivery-receipt small {display:block;color:var(--bubble-muted);font-size:11px;line-height:1.5}
+.delivery-receipt .message-photos {margin-top:10px}
+.working-indicator {display:flex;align-items:center;gap:10px;min-height:44px;padding:8px 18px;color:var(--muted);font-size:13px;line-height:1.5}
+.working-orb {flex:none;width:9px;height:9px;border-radius:50%;background:var(--positive);box-shadow:0 0 0 4px var(--positive-bg);animation:working-breathe 1.8s ease-in-out infinite}
+@keyframes working-breathe {50%{opacity:.45;transform:scale(.8)}}
+@media(prefers-reduced-motion:reduce){.working-orb {animation:none}}

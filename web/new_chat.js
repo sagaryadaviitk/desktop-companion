@@ -59,7 +59,7 @@ window.CompanionNewChat={install({api,post,preparePhoto,isConnected,onCreated,ge
     result((response.delivery.message||'Delivery could not be confirmed.')+' Open the chat before sending again.');el('new-chat-another').hidden=false;return;
    }
    const draft=response.delivery?.state==='sent'?null:{message:attempt.message,photos:[...photos]};
-   dialog.close();witness(null);await onCreated(response,draft);reset();el('new-chat-another').hidden=true;
+   dialog.close();witness(null);await onCreated(response,draft,{message:attempt.message,photos:[...photos]});reset();el('new-chat-another').hidden=true;
   }catch(error){if(epoch===version&&auth===getVersion()){
    if(error.result?.state==='rejected'||error.status===400||error.status===403){attempt=null;witness(null);}
    result(error.message+' Your question and photos are kept. An unchanged retry checks the same request.');

@@ -36,7 +36,7 @@ test('a failed edit retains the draft and reuses its request identity on an expl
 const app=fs.readFileSync(__dirname+'/web/app.js','utf8');
 function composerFixture(result){
  const doc=document(),drafts=new Map([['chat-1','My photo message']]),photos=new Map([['chat-1',[{id:'one'},{id:'two'}]]]);doc.getElementById('instruction').value='My photo message';const calls=[];
- const context={el:id=>doc.getElementById(id),selected:'chat-1',selectedData:{control:{available:true,live:{}},last_recorded_turn:{turn_id:'turn-1'}},sending:false,connected:true,csrf:'test',photoUploads:new Map(),photoDrafts:photos,drafts,deliveryMode:'queue',authVersion:0,commandAttempts:new Map(),crypto:{randomUUID:()=> 'composer-identity'},queueUI:{reveal(){}},updateComposer(){},showCommandResult(){},refreshChat:async()=>{},api:async(path,options)=>{calls.push(JSON.parse(options.body));return result(context,doc);}};
+ const context={el:id=>doc.getElementById(id),selected:'chat-1',selectedData:{control:{available:true,live:{}},last_recorded_turn:{turn_id:'turn-1'}},sending:false,connected:true,csrf:'test',photoUploads:new Map(),photoDrafts:photos,drafts,deliveryMode:'queue',authVersion:0,commandAttempts:new Map(),crypto:{randomUUID:()=> 'composer-identity'},queueUI:{reveal(){}},deliveryReceipts:{begin(){},settle(){},remove(){}},renderMessages(){},jumpLatest(){},updateComposer(){},showCommandResult(){},refreshChat:async()=>{},api:async(path,options)=>{calls.push(JSON.parse(options.body));return result(context,doc);}};
  vm.runInNewContext(app.slice(app.indexOf('el("composer").addEventListener("submit"'),app.indexOf("el('connect-chat').addEventListener")),context);
  return {doc,context,calls,drafts,photos,submit:()=>doc.getElementById('composer').emit('submit')};
 }
@@ -57,4 +57,10 @@ test('accepted final answers close the question panel; remaining questions and e
   const f=questionFixture(count,fail),form=walk(f.doc.getElementById('question-cards')).find(n=>n.tag==='form'),textarea=form.children.find(n=>n.tag==='textarea');textarea.value='My answer';await textarea.emit('input');await form.emit('submit');assert.equal(f.doc.getElementById('questions-dialog').open,open);
  }
  const f=questionFixture();f.context.selectedData.questions=[];f.context.questionSignature='';f.context.renderQuestions();assert.equal(f.doc.getElementById('questions-dialog').open,false);
+});
+
+test('an explicit unchanged retry retains its original request, mode and turn after live state changes',async()=>{
+ const f=composerFixture(async()=>{throw Error('Lost response');});f.context.deliveryMode='steer';f.context.selectedData.control.live={steer:true,execution:{turn_id:'original-turn'}};await f.submit();
+ f.context.deliveryMode='queue';f.context.selectedData.control.live={send_now:true,execution:{turn_id:'another-turn'}};await f.submit();
+ assert.equal(f.calls.length,2);assert.deepEqual(f.calls[1],f.calls[0]);assert.equal(f.calls[1].mode,'steer');assert.equal(f.calls[1].expected_turn_id,'original-turn');
 });

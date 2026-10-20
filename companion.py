@@ -35,7 +35,7 @@ from system_status import read_record
 
 ROOT = Path(__file__).resolve().parent
 STATIC_FILES={'/':('index.html','text/html'),'/style.css':('style.css','text/css'),'/theme.css':('theme.css','text/css'),
-              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue')}}
+              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation')}}
 def web_build():
     digest=hashlib.sha256()
     for path in sorted((ROOT/'web').glob('*')):
@@ -354,6 +354,7 @@ class History:
                 "id": item["item_id"], "role": role, "phase": value.get("phase", ""),
                 "text": redact(text), "ordinal": item["rollout_ordinal"],
                 "photos":photos,
+                "client_id":value.get("clientId") if role=="user" and isinstance(value.get("clientId"),str) else None,
                 "timestamp": item["created_at_ms"] or item["started_at_ms"] or item["completed_at_ms"],
             })
         thread["messages"] = messages
@@ -531,10 +532,12 @@ class CommandJournal:
             connection.execute("CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)")
         self.path.chmod(0o600)
 
-    def lookup(self, identity):
+    def lookup(self, identity, payload=None):
         with self.lock, closing(sqlite3.connect(self.path)) as connection:
-            row=connection.execute('SELECT result FROM commands WHERE id=?',(identity,)).fetchone()
-            return json.loads(row[0]) if row else None
+            row=connection.execute('SELECT fingerprint,result FROM commands WHERE id=?',(identity,)).fetchone()
+            if row and payload is not None and row[0]!=hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest():
+                raise ValueError('This command ID was already used for a different instruction.')
+            return json.loads(row[1]) if row else None
 
     def forget_deleted_answer(self, queue_id):
         # Only a confirmed deletion of its exact queue entry permits a new reply.
@@ -784,7 +787,14 @@ class Handler(BaseHTTPRequestHandler):
                 value['control']['live']=self.server.runtime.capabilities(thread_id) if self.server.runtime and value['control']['available'] and not value['archived'] else {'steer':False,'model_selection':False,'reason':SharedRuntime.REASON}
                 if value["archived"]:
                     value["control"]={"available":False,"reason":"Archived conversation. Restore it in the desktop app before queueing a follow-up."}
-                return self.reply(200, value)
+                # Revalidate live controls on every read, but avoid re-sending an unchanged transcript.
+                witness={**value};witness.pop('snapshot_at',None)
+                control={**value['control']};live={**control.get('live',{})};execution={**live.get('execution',{})}
+                checked=execution.pop('checked_at',0);live['execution']=execution;control['live']=live;witness['control']=control
+                revision='W/"'+hashlib.sha256(json.dumps(witness,sort_keys=True).encode()).hexdigest()+'"'
+                headers=[('ETag',revision),('X-Companion-Execution-Checked-At',str(checked))]
+                if self.headers.get('If-None-Match')==revision:return self.reply(304,b'',"text/plain",extra_headers=headers)
+                return self.reply(200, value,extra_headers=headers)
             return self.reply(404, {"error": "Not found."})
         except KeyError:
             return self.reply(404, {"error": "Chat not found."})
@@ -1010,6 +1020,11 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(message, str) or len(message.strip())>8000 or not message.strip() and not photo_ids:
                 raise ValueError("Add a message or a photo before sending.")
             if photo_ids and not self.server.photos:raise ValueError('Photo attachments are unavailable.')
+            # Recover an exact durable acknowledgement before checking mutable turn/photo state.
+            # A lost HTTP response must not turn a previously accepted send into a fresh send.
+            previous=self.server.journal.lookup(command_id,payload)
+            if previous and not (previous.get('state')=='rejected' and previous.get('retryable') is True):
+                return self.reply(200 if previous['state'] in ('queued','steered','sent') else 409,previous)
             photo_paths=self.server.photos.resolve(photo_ids,thread_id,session['id'] if session else 'local') if photo_ids else []
             message=message.strip() or 'Photo attached.'
             thread=self.server.history.read_thread(thread_id)
