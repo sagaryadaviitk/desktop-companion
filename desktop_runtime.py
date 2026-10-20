@@ -53,7 +53,7 @@ def queue_photo_message(thread_id,message,photos,executable=None,client_factory=
         raise RuntimeUnavailable('Photo queue acknowledgement could not be verified. Check the queue before resending.')
     if not queue_input_matches(accepted,message,photos):
         raise RuntimeUnavailable('Photo queue content acknowledgement changed. Check the queue before resending.')
-    return {'state':'queued','queue_item_id':queued_id,'message':'Message and photos queued for this desktop chat. Use Steer now to deliver them to its active turn.'}
+    return {'state':'queued','queue_item_id':queued_id,'message':'Message and photos queued for this desktop chat. They will wait until its active turn finishes.'}
 
 
 class QueueNotClaimed(RuntimeUnavailable):
