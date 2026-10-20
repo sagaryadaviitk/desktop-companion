@@ -26,5 +26,30 @@ window.CompanionShell=(()=>{
    if(typeof start==='number'&&typeof end==='number')input.setSelectionRange(start,end,direction||'none');
   });
  }
- return {standalone,haptic,sizeInput,repaintCaret};
+ function installKeyboard({isMobile}){
+  const input=document.getElementById('instruction');let gesture=null;
+  const selecting=()=>window.getSelection?.()?.isCollapsed===false||input.selectionStart!==input.selectionEnd;
+  const zoomed=()=>Math.abs((window.visualViewport?.scale||1)-1)>.05;
+  const cancel=()=>{gesture=null;};
+  document.addEventListener('touchstart',event=>{
+   cancel();
+   if(!isMobile()||event.touches.length!==1||zoomed()||document.activeElement!==input||!document.body.classList.contains('keyboard-open')||document.querySelector('dialog[open]')||selecting())return;
+   const target=event.target;
+   if(!(target instanceof Element)||!target.closest('#messages')||target.closest('a,button,input,textarea,select,[contenteditable],.code-block,.table-scroll'))return;
+   const touch=event.touches[0];gesture={x:touch.clientX,y:touch.clientY,finger:touch.identifier};
+  },{passive:true});
+  document.addEventListener('touchmove',event=>{
+   if(!gesture)return;
+   if(event.touches.length!==1||document.activeElement!==input||selecting()||zoomed()){cancel();return;}
+   const touch=event.touches[0];if(touch.identifier!==gesture.finger){cancel();return;}
+   const dy=touch.clientY-gesture.y,dx=Math.abs(touch.clientX-gesture.x);
+   if(dy< -12||(dx>18&&dx>Math.abs(dy))){cancel();return;}
+   // Only dismiss. Leave native scrolling alone and never reuse this swipe as
+   // a refresh gesture; refresh ignores gestures that begin with a keyboard.
+   if(dy>=40&&dy>dx*1.5){cancel();input.blur();}
+  },{passive:true});
+  document.addEventListener('touchend',cancel,{passive:true});
+  document.addEventListener('touchcancel',cancel,{passive:true});
+ }
+ return {standalone,haptic,sizeInput,repaintCaret,installKeyboard};
 })();

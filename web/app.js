@@ -342,6 +342,7 @@ function fitViewport(){
 window.visualViewport?.addEventListener("resize",fitViewport);window.visualViewport?.addEventListener("scroll",fitViewport);
 window.addEventListener("resize",fitViewport);window.addEventListener("orientationchange",()=>{viewportBaseline=0;fitViewport();});
 document.addEventListener("focusin",fitViewport);document.addEventListener("focusout",fitViewport);
+CompanionShell.installKeyboard({isMobile:mobile});
 conversationScroll=CompanionConversation.scroller(el("messages"),{changed:()=>{updateJump();scheduleMarkViewed();}});
 el("messages").addEventListener("scroll",()=>{updateJump();markViewed();},{passive:true});el("jump-latest").addEventListener("click",jumpLatest);
 fitViewport();
