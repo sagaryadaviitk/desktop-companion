@@ -11,7 +11,9 @@ let inboxView="recent",homeSignature="",deliveryMode="queue",markingAll=false,mo
 const readAcknowledgements=new Map(),modelAttempts=new Map();
 const readRequests=new Set();
 let displayedRevision=null,readFrame=0,refreshPromise=null,chatRequestVersion=0;
-let catalogRevision='';
+let catalogRevision='',conversationRevision='',chatRefreshPromise=null;
+const deliveryReceipts=CompanionConversation.receipts();
+let conversationScroll=null;
 const loadedBuild=document.querySelector('meta[name=companion-build]').content;
 let updater=null;
 function hasUnsentDraft(){return Boolean(newChatFlow?.hasDraft())||[...drafts.values()].some(value=>value.trim())||[...photoDrafts.values()].some(value=>value.length)||[...questionDrafts.values()].some(value=>typeof value==='string'?value.trim():value?.answer||value?.text);}
@@ -33,11 +35,13 @@ async function api(path, options = {}) {
   const version=authVersion,controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
   try{
     const response=await fetch(path,{cache:"no-store",...options,headers:{...options.headers,'X-Companion-UI':loadedBuild},signal:controller.signal});
+    if(response.status===304&&path.startsWith('/api/chat?')){if(version!==authVersion)throw new Error('The browser session changed.');return {unchanged:true,checked_at:Number(response.headers.get('X-Companion-Execution-Checked-At'))};}
     if(response.status===304&&path==='/api/chats'){if(version!==authVersion)throw new Error('The browser session changed.');return {unchanged:true};}
     const data=await response.json().catch(()=>null);
     if(version!==authVersion)throw new Error("The browser session changed. Please reconnect.");
     if(!response.ok){if(response.status===401&&data?.auth_required)lockScreen();throw Object.assign(new Error(data?.error||data?.message||(response.status===429?"Too many attempts. Wait a moment and try again.":`Your Mac could not complete the request (${response.status}). Try again.`)),{result:data,status:response.status});}
     if(!data)throw new Error("The connection returned an unexpected response. Try again.");
+    if(path.startsWith('/api/chat?'))data.view_revision=response.headers.get('ETag')||'';
     return data;
   }catch(error){
     if(error.name==="AbortError")throw new Error("The connection timed out. Check your connection and try again.");
@@ -47,10 +51,10 @@ async function api(path, options = {}) {
 }
 
 function lockScreen(){
-  authVersion++;selectionVersion++;connected=false;currentStatus=null;chatSignature="";pendingSignature="";commandAttempts.clear();
+  authVersion++;selectionVersion++;deliveryReceipts.reset();chatRefreshPromise=null;connected=false;currentStatus=null;chatSignature="";pendingSignature="";commandAttempts.clear();
   inboxView="recent";homeSignature="";deliveryMode="queue";readAcknowledgements.clear();modelAttempts.clear();
   displayedRevision=null;readRequests.clear();refreshPromise=null;cancelAnimationFrame(readFrame);el('pull-refresh').hidden=true;
-  catalogRevision='';
+  catalogRevision='';conversationRevision='';
   photoDrafts.clear();photoUploads.clear();queueSteering.clear();clearTimeout(resultTimer);renderPhotoDrafts();questionDrafts.clear();questionBusy.clear();questionErrors.clear();questionSignature='';el('questions-banner').hidden=true;el('question-cards').replaceChildren();
   for(const id of ['usage-dialog','model-dialog','phone-dialog','questions-dialog','host-dialog','new-chat-dialog','account-dialog','chat-actions-dialog','system-dialog'])if(el(id).open)el(id).close();
   newChatFlow?.reset();el('new-chat').disabled=true;
@@ -74,7 +78,7 @@ function lockScreen(){
 function showNotice(message){el("notice-text").textContent=message;el("notice").hidden=!message;}
 function updateComposer(){
   el('chat-options').disabled=!selectedData;
-  const panel=el("messages"),atBottom=panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
+  const panel=el("messages"),atBottom=conversationScroll?.following()??panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
   const input=el("instruction"),available=Boolean(selectedData?.control?.available);
   const photoCount=(photoDrafts.get(selected)||[]).length,uploading=photoUploads.get(selected)||0;
   document.querySelector('.composer-area').classList.toggle('has-draft',Boolean(input.value.trim()||photoCount));
@@ -83,14 +87,15 @@ function updateComposer(){
   const live=selectedData?.control?.live||{},canSteer=live.steer===true,canSend=live.send_now===true;
   if(deliveryMode==='queue'&&canSend||deliveryMode==='steer'&&!canSteer&&canSend)deliveryMode='send';
   if(deliveryMode==='send'&&!canSend)deliveryMode='queue';
-  el("send").disabled=!available||!connected||sending||uploading>0||!input.value.trim()&&!photoCount||deliveryMode==='steer'&&!canSteer;
-  const label=deliveryMode==='steer'?'Steer active turn':deliveryMode==='send'?'Send message':'Queue follow-up';
+  const prior=commandAttempts.get(selected),retrying=prior?.retrying&&prior.message===input.value.trim()&&JSON.stringify(prior.photos)===JSON.stringify((photoDrafts.get(selected)||[]).map(photo=>photo.id));
+  el("send").disabled=!available||!connected||sending||uploading>0||!input.value.trim()&&!photoCount||deliveryMode==='steer'&&!canSteer&&!retrying;
+  const label=retrying?'Check previous send':deliveryMode==='steer'?'Steer active turn':deliveryMode==='send'?'Send message':'Queue follow-up';
   el("send").setAttribute("aria-label",sending?'Sending…':label);el('send').querySelector('.send-label').textContent=label;
   el('mode-steer').disabled=!canSteer||!connected||sending;el('mode-steer').title=canSteer?'Send to the active turn':live.reason||'Live steering needs a shared desktop connection.';
   el('mode-queue').disabled=sending;
   el('mode-queue').textContent=canSend?'Send':'Queue';
   for(const mode of ['queue','steer'])el('mode-'+mode).setAttribute('aria-pressed',String(mode==='queue'?deliveryMode!=='steer':deliveryMode==='steer'));
-  if(selectedData)el('control-status').textContent=deliveryMode==='steer'?'Send guidance into the active desktop turn.':deliveryMode==='send'?'Send now and start the next turn in this desktop chat.':canSteer?'Wait until the current turn finishes. Choose Steer to redirect it now.':(live.reason||'Follow-ups wait in this chat’s desktop queue.');
+  if(selectedData)el('control-status').textContent=retrying?'Check the previous request before sending a new instruction. This retry keeps its original identity and delivery mode.':deliveryMode==='steer'?'Send guidance into the active desktop turn.':deliveryMode==='send'?'Send now and start the next turn in this desktop chat.':canSteer?'Wait until the current turn finishes. Choose Steer to redirect it now.':(live.reason||'Follow-ups wait in this chat’s desktop queue.');
   el('connect-chat').hidden=!available||!connected||live.connected===true||live.model_selection===true;el('connect-chat').disabled=connectingChat||sending;
   const model=live.model||selectedData?.details?.model;
   const modelName=(currentStatus?.models||[]).find(item=>item.id===model)?.name||model;
@@ -99,7 +104,7 @@ function updateComposer(){
   input.style.height="auto";input.style.height=Math.min(Math.max(50,input.scrollHeight),Math.min(160,window.innerHeight*.3))+"px";
   if(atBottom&&activeView==="conversation")jumpLatest();
 }
-function jumpLatest(){const panel=el("messages");panel.scrollTop=panel.scrollHeight;conversationNeedsScroll=false;updateJump();scheduleMarkViewed();}
+function jumpLatest(){const panel=el("messages");if(conversationScroll)conversationScroll.bottom();else panel.scrollTop=panel.scrollHeight;conversationNeedsScroll=false;updateJump();scheduleMarkViewed();}
 function updateJump(){const panel=el("messages");el("jump-latest").hidden=!selected||activeView!=="conversation"||panel.scrollHeight-panel.scrollTop-panel.clientHeight<140;}
 
 function inConversation(){return selected&&activeView==='conversation'&&!document.hidden&&!document.querySelector('dialog[open]')&&!document.body.classList.contains('home-open')&&(!mobile()||document.body.classList.contains('chat-open'));}
@@ -194,6 +199,7 @@ function renderHostStatus(){
   if(check.update_available)add('p',`Locked Use update available: ${check.installed_version||'not detected'} → ${check.available_version}. On your Mac, open Raycast → Desktop Companion → Unattended mode → Update Locked Use… and complete the macOS prompt.`);
   add('p',check.state==='blocked'?'Last native app test: blocked. macOS automatic unlock did not complete.':check.state==='passed'?'Last native app test: passed.':'Native app access while locked has not been verified.');
   if(check.checked_at)add('p',`Checked ${shortTime(check.checked_at*1000)}${check.stale?' · Previous test; not a current access guarantee.':''}`);
+  if(check.state==='blocked')add('p','Recovery: manually unlock once, confirm Locked use is enabled, then lock again and start a fresh native-app test from your phone. Local keyboard or pointer input can pause automatic unlock. Companion cannot clear that macOS/ChatGPT safeguard.');
   if(check.locked_use_installed===true)add('p','The app’s Locked Use component was installed at that check. This alone does not prove native app access.');
   add('p','ChatGPT Settings → Computer Use → Locked use controls this separately. ChatGPT also requires an active, trusted Computer Use turn. Keeping the Mac awake or sending a message does not guarantee that native Chrome or another desktop app can be opened while locked.');
   const link=add('a','Open the official Locked Use guide');link.href='https://learn.chatgpt.com/docs/computer-use#locked-use';link.target='_blank';link.rel='noopener noreferrer';
@@ -219,7 +225,7 @@ async function steerQueued(instruction,data){
   const target=data.id,version=authVersion;queueSteering.add(instruction.id);renderQuestions();
   try{
     const result=await api('/api/queue/steer',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target,queue_id:instruction.id,revision:instruction.revision,expected_turn_id:data.control.live?.execution?.turn_id||data.last_recorded_turn?.turn_id})});
-    if(version===authVersion&&target===selected)showCommandResult(result.message,true);
+    if(version===authVersion){deliveryReceipts.begin(target,'queue:'+instruction.id,instruction.text,instruction.photos||[]);deliveryReceipts.settle(target,'queue:'+instruction.id,result);if(target===selected){renderMessages();showCommandResult(result.message,true);}}
     return result;
   }finally{queueSteering.delete(instruction.id);pendingSignature='';questionSignature='';if(version===authVersion&&target===selected)await refreshChat();}
 }
@@ -323,7 +329,7 @@ function fitViewport(){
     const viewport=window.visualViewport,unzoomed=!viewport||Math.abs(viewport.scale-1)<.05;
     // Pinch zoom must keep its native panning and magnification behavior.
     if(!unzoomed)return;
-    const panel=el("messages"),atBottom=panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
+    const panel=el("messages"),atBottom=conversationScroll?.following()??panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
     const editing=document.activeElement?.matches("input,textarea,select");
     const height=viewport?.height||window.innerHeight;
     if(!editing)viewportBaseline=height;else viewportBaseline=Math.max(viewportBaseline,window.innerHeight,height);
@@ -336,6 +342,7 @@ function fitViewport(){
 window.visualViewport?.addEventListener("resize",fitViewport);window.visualViewport?.addEventListener("scroll",fitViewport);
 window.addEventListener("resize",fitViewport);window.addEventListener("orientationchange",()=>{viewportBaseline=0;fitViewport();});
 document.addEventListener("focusin",fitViewport);document.addEventListener("focusout",fitViewport);
+conversationScroll=CompanionConversation.scroller(el("messages"),{changed:()=>{updateJump();scheduleMarkViewed();}});
 el("messages").addEventListener("scroll",()=>{updateJump();markViewed();},{passive:true});el("jump-latest").addEventListener("click",jumpLatest);
 fitViewport();
 
@@ -449,9 +456,9 @@ async function selectChat(id,navigate=true) {
     history.pushState({companion:true,view:"chat",id},"",url.pathname+url.search);
   }
   document.body.classList.remove('home-open');el('home-screen').hidden=true;
-  if(id===selected&&selectedData){document.activeElement?.blur();document.body.classList.add("chat-open");if(reopening)conversationNeedsScroll=true;renderQuestions();updateComposer();return refreshChat();}
+  if(id===selected&&selectedData){document.activeElement?.blur();document.body.classList.add("chat-open");if(reopening){conversationNeedsScroll=true;conversationScroll.open();jumpLatest();}renderQuestions();updateComposer();return refreshChat();}
   document.activeElement?.blur();selectionVersion++;
-  selected=id; selectedData=null;displayedRevision=null;deliveryMode='queue'; lastSignature="";panelSignature="";pendingSignature="";conversationNeedsScroll=true; messageMap.clear();nextBefore=null;loadedEarlier=false;loadingEarlier=false;el("command-result").textContent="";
+  selected=id;conversationRevision=''; conversationScroll.open();selectedData=null;displayedRevision=null;deliveryMode='queue'; lastSignature="";panelSignature="";pendingSignature="";conversationNeedsScroll=true; messageMap.clear();nextBefore=null;loadedEarlier=false;loadingEarlier=false;el("command-result").textContent="";
   el("instruction").value=drafts.get(id)||"";
   el("instruction").disabled=true; el("send").disabled=true;
   el("messages").replaceChildren();el("pending").replaceChildren();el("title").textContent=chats.find(chat=>chat.id===id)?.title||"Loading conversation…";el("activity").textContent="Loading the recorded conversation…";
@@ -463,9 +470,10 @@ async function selectChat(id,navigate=true) {
 
 function renderMessages(preservePosition=false){
   const messages=[...messageMap.values()].sort((a,b)=>(a.ordinal??a.timestamp??0)-(b.ordinal??b.timestamp??0));
-  const signature=JSON.stringify([messages,nextBefore,loadingEarlier]);
+  const receipts=deliveryReceipts.list(selected,messages),working=CompanionConversation.working(selectedData?.control?.live?.execution,connected);
+  const signature=JSON.stringify([messages,nextBefore,loadingEarlier,receipts,working]);
   if(signature===lastSignature)return;
-  const panel=el("messages"),nearBottom=panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
+  const panel=el("messages"),nearBottom=conversationScroll?.following()??panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
   const first=!lastSignature,oldTop=panel.scrollTop,top=panel.getBoundingClientRect().top;
   const existing=new Map([...panel.querySelectorAll("article[data-message]")].map(article=>[article.dataset.message,article]));
   const anchor=[...existing.values()].find(article=>article.getBoundingClientRect().bottom>top);
@@ -505,7 +513,8 @@ function renderMessages(preservePosition=false){
   }
   for(const [key,article]of existing)if(!retained.has(key))article.remove();
   panel.querySelector(".empty-message")?.remove();
-  if(!messages.length){const text=document.createElement("p");text.className="empty-message";text.textContent=selectedData?.archived?'No messages are saved in this chat.':'No messages yet. Write your first message below to get started.';panel.append(text);}
+  if(!messages.length&&!receipts.length){const text=document.createElement("p");text.className="empty-message";text.textContent=selectedData?.archived?'No messages are saved in this chat.':'No messages yet. Write your first message below to get started.';panel.append(text);}
+  renderConversationTail(panel,receipts,working);
   if((first||nearBottom)&&!preservePosition&&activeView==="conversation")jumpLatest();
   else if(anchor?.isConnected)panel.scrollTop=oldTop+anchor.getBoundingClientRect().top-top-anchorOffset;
   else panel.scrollTop=oldTop;
@@ -513,9 +522,25 @@ function renderMessages(preservePosition=false){
   updateJump();
 }
 
+function renderConversationTail(panel,receipts,working){
+  let tail=panel.querySelector('.conversation-live');
+  if(!tail){tail=document.createElement('div');tail.className='conversation-live';panel.append(tail);}
+  tail.replaceChildren();
+  for(const receipt of receipts){
+    const card=document.createElement('div');card.className='delivery-receipt';card.dataset.request=receipt.id;
+    const text=document.createElement('p');text.textContent=receipt.text||'Photo attached.';
+    const state=document.createElement('small');state.textContent=receipt.state==='accepted'?'Accepted by Mac · Syncing conversation…':'Sending to your Mac…';card.append(text,state);
+    if(receipt.photos.length){const photos=document.createElement('div');photos.className='message-photos';for(const photo of receipt.photos){if(!/^\/api\/photos\/[a-f0-9]{32}$/.test(photo.url))continue;const img=document.createElement('img');img.src=photo.url;img.alt=photo.name||'Attached photo';photos.append(img);}card.append(photos);}
+    tail.append(card);
+  }
+  if(working){const status=document.createElement('div');status.className='working-indicator';status.setAttribute('role','status');
+    const orb=document.createElement('span');orb.className='working-orb';orb.setAttribute('aria-hidden','true');
+    const text=document.createElement('span');text.textContent='Working on your Mac…';status.append(orb,text);tail.append(status);}
+}
+
 async function loadEarlier(){
   if(loadingEarlier||nextBefore===null||!selected)return;
-  const id=selected,cursor=nextBefore,version=selectionVersion;loadingEarlier=true;renderMessages();
+  const id=selected,cursor=nextBefore,version=selectionVersion;conversationScroll.pause();loadingEarlier=true;renderMessages();
   try{
     const data=await api(`/api/chat?id=${encodeURIComponent(id)}&before=${cursor}`);
     if(id!==selected||version!==selectionVersion)return;
@@ -524,13 +549,30 @@ async function loadEarlier(){
   }catch(error){if(id===selected&&version===selectionVersion){loadingEarlier=false;renderMessages();el("command-result").textContent=`Earlier messages could not load: ${error.message}`;}}
 }
 
-async function refreshChat() {
+async function refreshChat(fresh=false){
+  if(!selected||document.body.classList.contains('home-open'))return true;
+  const key=authVersion+':'+selectionVersion+':'+selected;
+  if(chatRefreshPromise?.key===key){
+    const previous=chatRefreshPromise.promise;
+    if(!fresh)return previous;
+    await previous;
+    if(key!==authVersion+':'+selectionVersion+':'+selected)return;
+    return refreshChat();
+  }
+  const task=readCurrentChat();chatRefreshPromise={key,promise:task};
+  try{return await task;}finally{if(chatRefreshPromise?.promise===task)chatRefreshPromise=null;}
+}
+async function readCurrentChat() {
   if (!selected||document.body.classList.contains('home-open')) return true;
   const id=selected,version=selectionVersion,request=++chatRequestVersion;
   try {
-    const data=await api(`/api/chat?id=${encodeURIComponent(id)}`);
+    const data=await api(`/api/chat?id=${encodeURIComponent(id)}`,conversationRevision?{headers:{'If-None-Match':conversationRevision}}:{});
     if(id!==selected||version!==selectionVersion||request!==chatRequestVersion||document.body.classList.contains('home-open'))return;
-    selectedData=data;
+    if(data.unchanged&&selectedData){
+      if(selectedData.control?.live?.execution&&Number.isFinite(data.checked_at)&&data.checked_at>0)selectedData.control.live.execution.checked_at=data.checked_at;
+      renderMessages();if(conversationNeedsScroll&&activeView==='conversation')jumpLatest();return true;
+    }
+    conversationRevision=data.view_revision||'';selectedData=data;
     if(data.control.live?.execution&&currentStatus){currentStatus.execution=currentStatus.execution||{};currentStatus.execution[id]=data.control.live.execution;}
     renderQuestions();
     renderPanels(data);
@@ -559,16 +601,16 @@ async function refreshChat() {
     scheduleMarkViewed();
     if(el('model-dialog').open)renderModelDialog();
     return true;
-  }catch(error){if(id===selected&&version===selectionVersion&&request===chatRequestVersion){selectedData=null;displayedRevision=null;renderQuestions();updateComposer();el("control-status").textContent=error.message;showNotice(`This chat could not refresh. ${error.message}`);}return false;}
+  }catch(error){if(id===selected&&version===selectionVersion&&request===chatRequestVersion){selectedData=null;conversationRevision='';displayedRevision=null;renderQuestions();renderMessages();updateComposer();el("control-status").textContent=error.message;showNotice(`This chat could not refresh. ${error.message}`);}return false;}
 }
 
-async function refreshAll(force=false){
+async function refreshAll(force=false,skipChat=false){
   if(force===true)catalogRevision='';
   if(refreshPromise)return refreshPromise;
-  const task=refreshWorkspace();refreshPromise=task;
+  const task=refreshWorkspace(skipChat);refreshPromise=task;
   try{return await task;}finally{if(refreshPromise===task)refreshPromise=null;}
 }
-async function refreshWorkspace(){
+async function refreshWorkspace(skipChat=false){
   refreshing=true;
   const version=authVersion;
   try{
@@ -587,7 +629,7 @@ async function refreshWorkspace(){
     if(status.phone_setup_available&&el("phone-dialog").open)await showDevices();
     if(el('host-dialog').open)renderHostStatus();
     if(initialSelectionPending){initialSelectionPending=false;const requested=new URLSearchParams(location.search).get("chat");const target=chats.find(chat=>chat.id===requested);if(target?.archived||target?.subagent){el("chat-filter").value=target.archived?"archived":"subagents";renderChats();}if(target)await selectChat(target.id,Boolean(mobile()&&!history.state?.companion));else{document.body.classList.add('home-open');el('home-screen').hidden=false;}}
-    else if(await refreshChat()===false)return false;
+    else if(!skipChat&&await refreshChat()===false)return false;
     updateComposer();
     return true;
   }catch(error){if(version!==authVersion)return;connected=false;renderChats();renderQuestions();renderPower(currentStatus?.power||{},true);if(currentStatus?.usage){currentStatus.usage.stale=true;renderUsage();}document.body.classList.add("disconnected");el("footer-connection").textContent="Connection interrupted";el("sidebar-retry").hidden=false;el("connection").textContent="Disconnected";el("connection-dot").className="dot offline";showNotice(`Updates paused. ${error.message}`);el("control-status").textContent="You can keep drafting. Reconnect to queue your follow-up.";updateComposer();if(document.body.classList.contains("booting")){el("startup-message").textContent=error.message;el("startup-retry").hidden=false;}return false;}
@@ -631,7 +673,8 @@ for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener(
 function showList(){document.activeElement?.blur();document.body.classList.remove("chat-open");document.body.classList.add('home-open');el('home-screen').hidden=false;renderHome();renderChats();}
 function newChatProject(){return el('project-filter').value||(!document.body.classList.contains('home-open')?selectedData?.project_key:'')||'personal';}
 function post(path,payload){return api(path,{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify(payload)});}
-if(window.CompanionNewChat)newChatFlow=CompanionNewChat.install({api,post,preparePhoto,isConnected:()=>connected,getVersion:()=>authVersion,onCreated:async(result,draft)=>{
+if(window.CompanionNewChat)newChatFlow=CompanionNewChat.install({api,post,preparePhoto,isConnected:()=>connected,getVersion:()=>authVersion,onCreated:async(result,draft,submitted)=>{
+  if(result.delivery?.state==='sent'&&submitted){deliveryReceipts.begin(result.thread_id,'initial:'+result.thread_id,submitted.message,submitted.photos);deliveryReceipts.settle(result.thread_id,'initial:'+result.thread_id,result.delivery);}
   inboxView='recent';el('search').value='';el('project-filter').value='';el('chat-filter').value='active';
   await refreshAll(true);await selectChat(result.thread_id);
   if(draft){drafts.set(result.thread_id,draft.message);photoDrafts.set(result.thread_id,draft.photos);el('instruction').value=draft.message;updateComposer();}
@@ -695,31 +738,36 @@ el("composer").addEventListener("submit",async event=>{
   const message=el("instruction").value.trim();
   const photos=(photoDrafts.get(selected)||[]).map(photo=>photo.id);
   if((!message&&!photos.length)||sending||photoUploads.get(selected)||!connected||!selectedData?.control.available)return;
-  const mode=deliveryMode,turn=selectedData?.control.live?.execution||selectedData?.last_recorded_turn;
-  if(mode==='steer'&&!selectedData.control.live?.steer)return;
+  const turn=selectedData?.control.live?.execution||selectedData?.last_recorded_turn;
   const target=selected,version=authVersion,original=el("instruction").value;
   let attempt=commandAttempts.get(target);
-  if(!attempt||attempt.message!==message||attempt.mode!==mode||JSON.stringify(attempt.photos)!==JSON.stringify(photos)||mode==='steer'&&attempt.turn!==turn?.turn_id){attempt={message,mode,photos,turn:turn?.turn_id,id:crypto.randomUUID()};commandAttempts.set(target,attempt);}
-  sending=true;updateComposer();
+  if(!attempt||attempt.message!==message||JSON.stringify(attempt.photos)!==JSON.stringify(photos)){attempt={message,mode:deliveryMode,photos,turn:turn?.turn_id,id:crypto.randomUUID()};commandAttempts.set(target,attempt);}
+  const mode=attempt.mode;
+  if(mode==='steer'&&!selectedData.control.live?.steer&&!attempt.retrying)return;
+  deliveryReceipts.begin(target,attempt.id,message,(photoDrafts.get(target)||[]).filter(photo=>photos.includes(photo.id)));
+  sending=true;renderMessages();jumpLatest();updateComposer();
   el("command-result").textContent=mode==='steer'?'Sending to the active desktop turn…':mode==='send'?'Starting the next desktop turn…':"Queueing for the selected desktop chat…";
   try{
     const payload={command_id:attempt.id,thread_id:target,message,mode,photos};if(mode==='steer')payload.expected_turn_id=attempt.turn;
     const result=await api("/api/command",{method:"POST",headers:{"Content-Type":"application/json","X-Companion-CSRF":csrf},body:JSON.stringify(payload)});
     if(version!==authVersion)return;
+    deliveryReceipts.settle(target,attempt.id,result);
     commandAttempts.delete(target);
     if(result.state==='queued')queueUI.reveal();
     photoDrafts.set(target,(photoDrafts.get(target)||[]).filter(photo=>!photos.includes(photo.id)));
     if(drafts.get(target)===original)drafts.delete(target);
     if(selected===target){showCommandResult(result.message,true);if(el("instruction").value===original)el("instruction").value="";}
-  }catch(error){if(version===authVersion&&selected===target)el("command-result").textContent=`${error.message} Your draft is kept. Check ${mode==='queue'?'the queued follow-ups':'the desktop conversation'} before retrying; an unchanged retry uses the same request ID.`;}
-  finally{sending=false;updateComposer();if(version===authVersion)await refreshChat();}
+  }catch(error){attempt.retrying=true;if(error.result?.state==='rejected'||error.status>=400&&error.status<500&&error.result?.state!=='unknown'&&error.status!==429)commandAttempts.delete(target);deliveryReceipts.remove(attempt.id);if(version===authVersion&&selected===target)el("command-result").textContent=`${error.message} Your draft is kept. Check ${mode==='queue'?'the queued follow-ups':'the desktop conversation'} before retrying; an unchanged retry uses the same request ID.`;}
+  finally{sending=false;if(version===authVersion){renderMessages();updateComposer();await refreshChat(true);}}
 });
 el('connect-chat').addEventListener('click',async()=>{if(connectingChat||!selected)return;const target=selected;connectingChat=true;updateComposer();try{const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});if(target===selected){showCommandResult(result.message,true);await refreshChat();}}catch(error){if(target===selected)showCommandResult(error.message);}finally{connectingChat=false;updateComposer();}});
-if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>sending||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>showCommandResult('Wait for the current operation to finish before reloading.')});
+if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>showCommandResult('Wait for the current operation to finish before reloading.')});
 window.addEventListener('pageshow',event=>{if(event.persisted&&!document.body.classList.contains('signed-out'))refreshAll(true);});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&!document.body.classList.contains("signed-out")){scheduleMarkViewed();if(document.body.classList.contains("booting"))initialize();else refreshAll();}});
 window.addEventListener("online",()=>{if(document.body.classList.contains("booting"))initialize();else if(!document.body.classList.contains("signed-out"))refreshAll();});
-setInterval(()=>{if(!document.hidden&&!document.body.classList.contains("signed-out")){if(document.body.classList.contains("booting"))initialize();else refreshAll();}},5000);
+const pollingEnabled=()=>!document.hidden&&!document.body.classList.contains('signed-out');
+CompanionConversation.poll({enabled:pollingEnabled,read:()=>document.body.classList.contains('booting')?initialize():refreshAll(false,true),delay:()=>inConversation()?15000:5000});
+CompanionConversation.poll({enabled:()=>pollingEnabled()&&Boolean(selected)&&!document.body.classList.contains('home-open'),read:refreshChat,delay:()=>sending||deliveryReceipts.list(selected).length||CompanionConversation.working(selectedData?.control?.live?.execution,connected)?1500:5000});
 async function initialize(){if(starting)return;starting=true;el("startup-retry").hidden=true;try{const auth=await api("/api/auth/status");if(auth.authenticated)await refreshAll();else lockScreen();}catch(error){el("startup-message").textContent=error.message;el("startup-retry").hidden=false;}finally{starting=false;}}
 el("startup-retry").addEventListener("click",initialize);
 initialize();

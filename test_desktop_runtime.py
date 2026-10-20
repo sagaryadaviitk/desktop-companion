@@ -160,6 +160,7 @@ class DesktopRuntimeTests(unittest.TestCase):
         self.assertEqual(request['targetClientId'],'desktop-owner');self.assertEqual(request['params']['conversationId'],'chat-1')
         self.assertEqual(request['params']['input'],[{'type':'text','text':'Keep the fix small','text_elements':[]}])
         self.assertEqual(request['params']['attachments'],[])
+        self.assertEqual(result['client_id'],request['params']['clientUserMessageId'])
         self.assertNotIn('approvalPolicy',json.dumps(request));self.assertNotIn('sandbox',json.dumps(request))
         self.wrong_turn=True
         with self.assertRaises(RuntimeUnavailable):self.runtime.steer('chat-1','Another correction','turn-1')
@@ -188,6 +189,7 @@ class DesktopRuntimeTests(unittest.TestCase):
         request=self.requests[-1];self.assertEqual(request['version'],2)
         operation=request['params']['turnStart'];self.assertEqual(operation['request']['threadId'],'chat-1')
         self.assertTrue(operation['context']['inheritThreadSettings'])
+        self.assertEqual(result['client_id'],operation['request']['clientUserMessageId'])
         for forbidden in ('model','effort','approvalPolicy','sandboxPolicy','permissions'):
             self.assertNotIn(forbidden,operation['request'])
 

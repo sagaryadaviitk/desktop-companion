@@ -17,6 +17,7 @@
   <script src="/new_chat.js?v=__BUILD__" defer></script>
   <script src="/updates.js?v=__BUILD__" defer></script>
   <script src="/queue.js?v=__BUILD__" defer></script>
+  <script src="/conversation.js?v=__BUILD__" defer></script>
   <script src="/app.js?v=__BUILD__" defer></script>
 </head>
 <body class="booting">
@@ -43,7 +44,7 @@
       <div id="workspace-summary" class="workspace-summary"></div>
       <section id="projects" class="project-catalog" aria-label="Projects and folders" hidden></section>
       <nav id="chats" aria-label="Conversations"></nav>
-      <footer id="sidebar-footer" class="sidebar-footer"><span class="footer-dot"></span> <span id="footer-connection">Connecting to your Mac</span><br><span>Updates every 5 seconds while open.</span><button id="sidebar-retry" class="sidebar-action" hidden>Retry connection</button></footer>
+      <footer id="sidebar-footer" class="sidebar-footer"><span class="footer-dot"></span> <span id="footer-connection">Connecting to your Mac</span><br><span>Live chat updates while open.</span><button id="sidebar-retry" class="sidebar-action" hidden>Retry connection</button></footer>
     </aside>
     <section class="conversation" aria-label="Selected conversation">
       <section id="home-screen" class="home-screen" aria-label="Workspace home" hidden><span class="eyebrow">DESKTOP COMPANION</span><h2>Pick up where you left off.</h2><p class="home-intro">Your projects, conversations, and updates from your Mac.</p><div id="home-stats" class="home-stats"></div><div class="home-section-heading"><h3 id="home-chats-heading">Recent conversations</h3><span id="home-updated"></span></div><div id="home-chats" class="home-chats"></div><p class="home-note">Unread is tracked across paired Companion browsers, starting with available desktop unread receipts. Working is confirmed with the running desktop. An unavailable live status is shown separately.</p></section>

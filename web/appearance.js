@@ -8,7 +8,7 @@ window.CompanionAppearance=(()=>{
   const resolved=preference==='system'?(media.matches?'dark':'light'):preference;
   document.documentElement.dataset.theme=resolved;
   document.documentElement.dataset.appearance=preference;
-  const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=resolved==='dark'?'#181818':'#f5f5f7';
+  const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=resolved==='dark'?'#202020':'#f5f5f7';
   for(const button of document.querySelectorAll('[data-theme-choice]'))button.setAttribute('aria-pressed',String(button.dataset.themeChoice===preference));
   const note=document.getElementById('appearance-note');if(note)note.textContent=preference==='system'?'Follows this device’s light or dark appearance.':'Saved for this browser.';
  }

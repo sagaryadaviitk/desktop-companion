@@ -6,7 +6,7 @@ function appearance(saved=null,dark=false,blocked=false){
  vm.runInNewContext(fs.readFileSync(__dirname+'/web/appearance.js','utf8'),context);return {theme:context.window.CompanionAppearance,root,meta,note,stored,handlers,media,buttons};
 }
 test('system theme is applied before the page renders and follows device changes',()=>{
- const f=appearance(null,true);assert.equal(f.root.dataset.theme,'dark');assert.equal(f.meta.content,'#181818');f.handlers.DOMContentLoaded();assert.equal(f.buttons[2]['aria-pressed'],'true');f.media.matches=false;f.media.change();assert.equal(f.root.dataset.theme,'light');
+ const f=appearance(null,true);assert.equal(f.root.dataset.theme,'dark');assert.equal(f.meta.content,'#202020');f.handlers.DOMContentLoaded();assert.equal(f.buttons[2]['aria-pressed'],'true');f.media.matches=false;f.media.change();assert.equal(f.root.dataset.theme,'light');
 });
 test('explicit theme survives reload and system changes, and syncs across same-origin tabs',()=>{
  const f=appearance('dark');f.handlers.DOMContentLoaded();f.buttons[0].click();assert.equal(f.stored.get('companion-appearance'),'light');f.media.matches=true;f.media.change();assert.equal(f.root.dataset.theme,'light');assert.equal(appearance(f.stored.get('companion-appearance')).root.dataset.theme,'light');f.handlers.storage({key:'companion-appearance',newValue:'dark'});assert.equal(f.root.dataset.theme,'dark');

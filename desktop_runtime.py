@@ -293,7 +293,7 @@ class DesktopRuntime:
             result = response.get('result', {}).get('result', {})
             if result.get('turnId') != expected_turn_id:
                 raise RuntimeUnavailable('The desktop turn changed during submission. Check the conversation before retrying.')
-            return {'state': 'steered', 'turn_id': result['turnId'],
+            return {'state': 'steered', 'turn_id': result['turnId'], 'client_id': identity,
                     'message': 'Accepted by the active desktop turn. This was not added to the follow-up queue.'}
 
     def send_now(self, thread_id, message,photos=None):
@@ -312,7 +312,7 @@ class DesktopRuntime:
             turn = response.get('result', {}).get('result', {}).get('turn', {})
             if not isinstance(turn.get('id'), str) or turn.get('status') != 'inProgress':
                 raise RuntimeUnavailable('Desktop start acknowledgement could not be verified. Check the chat before retrying.')
-            return {'state': 'sent', 'turn_id': turn['id'], 'message': 'Sent to the desktop. A new turn has started.'}
+            return {'state': 'sent', 'turn_id': turn['id'], 'client_id': identity, 'message': 'Sent to the desktop. A new turn has started.'}
 
     def set_model(self, thread_id, model, effort=None):
         with self.client() as client:
@@ -366,7 +366,7 @@ class DesktopRuntime:
                 result=response.get('result',{}).get('result',{})
                 if result.get('turnId')!=expected_turn_id:raise RuntimeUnavailable('Queue promotion acknowledgement is unconfirmed. Check the saved message below before retrying.')
                 self.promotions.stage(item['id'],'sent')
-                return {'state':'steered','turn_id':result['turnId'],'message':'Moved this queued message into the active turn. It is no longer waiting in the queue.'}
+                return {'state':'steered','turn_id':result['turnId'],'client_id':item['client_id'],'message':'Moved this queued message into the active turn. It is no longer waiting in the queue.'}
             except QueueNotClaimed:
                 self.promotions.stage(item['id'],'not_claimed')
                 raise

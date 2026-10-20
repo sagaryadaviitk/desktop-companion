@@ -4,6 +4,51 @@ Browse the desktop app’s local projects, chats, history, and recorded progress
 
 For a second Mac, start with [SETUP.md](SETUP.md). Each Mac has independent settings, history, pairing, and tunnel access. A clean source copy starts locally only.
 
+## Install on a second Mac
+
+The source is in the private personal repository [sagaryadaviitk/desktop-companion](https://github.com/sagaryadaviitk/desktop-companion). Each Mac runs independently; Git shares code, not chat sessions, settings, browser pairing, or credentials. The agent on the new Mac should read this section, [AGENTS.md](AGENTS.md), and [SETUP.md](SETUP.md) before installing.
+
+1. Install and sign in to the ChatGPT/Codex Mac app normally. Create or open a local chat once. Install Python **3.11 or newer**, Git/GitHub CLI, and Apple command-line tools (`xcode-select --install` if missing). Node **24** is used for tests; it is not needed to run the app. Install `cloudflared` only for remote phone access.
+2. Sign in to your **personal** GitHub account through `gh auth login`, and choose a permanent source location. Do not copy another Mac's `.state/`, `config.local.json`, desktop sign-in, or tunnel credentials.
+
+```sh
+mkdir -p ~/Developer
+cd ~/Developer
+gh repo clone sagaryadaviitk/desktop-companion
+cd desktop-companion
+python3 manage.py doctor
+python3 -m unittest discover -p 'test_*.py' -q
+node --test test_*.cjs
+python3 manage.py setup
+```
+
+Doctor reports missing dependencies or incompatible history before setup. Setup builds `~/Applications/Desktop Companion.app` for this Mac's Python/source paths and installs its login LaunchAgent. Keep the source folder at this location. Use `python3 manage.py setup --without-app` if you deliberately want only the browser/service. Open **Raycast → Desktop Companion** or <http://127.0.0.1:8765>. A fresh clone starts locally only; setup does not change power, password, or Locked Use settings.
+
+3. If phone access is needed, use a **separate hostname and tunnel for this Mac**. Through your own Cloudflare account, authenticate the CLI and create/route the new tunnel. The following example uses a new hostname; do not reuse the first Mac's live hostname or connector credential.
+
+```sh
+cloudflared tunnel login
+cloudflared tunnel create desktop-companion-second
+cloudflared tunnel route dns desktop-companion-second agents-second.sagaryadav.me
+python3 manage.py configure --hostname agents-second.sagaryadav.me --tunnel-id YOUR-NEW-TUNNEL-UUID
+python3 manage.py doctor
+python3 service.py restart
+```
+
+Use the UUID reported by `tunnel create`; its credential stays in this Mac's `~/.cloudflared`. This one full restart applies the new machine configuration. Open **Phone access** in the native app, create a one-use code, and pair the phone browser with this Mac's hostname. Keep TLS verification and network security software enabled. A network policy that blocks the tunnel needs an approved network fix; reinstalling Companion does not bypass it.
+
+4. Verify each layer separately:
+
+```sh
+python3 service.py status
+curl --fail http://127.0.0.1:8765/healthz
+curl -s -o /dev/null -w '%{http_code}\n' https://agents-second.sagaryadav.me/api/chats
+```
+
+The local health endpoint should return `ok: true`. An **unpaired** public API request should return **401**; this proves the protected route is reachable, not that the phone is paired. From the paired phone, open a chat, send a harmless message, and verify it appears exactly once in desktop history. Test photos, a fresh locked native-app turn, and lid-close/mobile-data continuity separately. Do not mark those tests passed based only on a running process, installed plug-in, or green tunnel node.
+
+For subsequent updates, use a clean `main` checkout and `git pull --ff-only`, then run the tests. Static web assets require no restart. Python HTTP/bridge updates use `python3 service.py restart-web`; native Swift changes use `python3 build_app.py` and reopening the control app. A supervisor or machine-configuration update needs one coordinated full restart. Work in a separate feature worktree so edits do not change the installed service underneath it. [CONTRIBUTING.md](CONTRIBUTING.md) has the exact update/PR workflow; [SETUP.md](SETUP.md) covers troubleshooting and per-Mac configuration.
+
 ## Everyday use
 
 Open **Raycast → Desktop Companion** for the native control app. It shows the web server, desktop connection, tunnel, battery/lid state, unattended settings, pairing-code history, and browser sessions. It can start/restart the service even if the dashboard is unavailable. Closing the control app leaves the background service running.
@@ -20,6 +65,9 @@ On the phone:
 - **Chat options → Rename chat** updates the saved desktop name. The same menu offers **New chat in this project** and **Copy chat link**; copied phone links still require a paired browser.
 - Paste a photo directly into the message box, or use **+ → Paste photo / Choose photos**. Preview/remove attachments before sending. Up to three photos are supported.
 - An idle connected chat offers **Send**. A running connected chat offers **Queue** and **Steer** once there is content to send. Choose Steer, then press the send arrow. Queued messages show photo counts/previews with **Steer now**, **Edit**, and **Delete**. Editing updates that entry in place and retains its photos; deletion requires a review. Unsupported attachments still require the desktop.
+- A submitted message appears immediately with **Sending to your Mac**, then **Accepted by Mac · Syncing conversation** after verified Send/Steer acknowledgement. It merges into saved history only by the exact desktop client message ID. Queue entries stay in the queue panel; rejected or uncertain requests keep the draft. This feedback is local to the current browser tab and never sends another command.
+- **Working on your Mac…** appears at the end only for a recently confirmed active desktop turn. The open conversation refreshes independently (about 1.5 seconds while working or syncing, five seconds when idle), with no overlapping polls and no reads while hidden. Conditional reads recheck live controls but omit unchanged transcript bodies.
+- Reopening a chat starts at the latest message and follows late photo/layout changes. Deliberately scrolling into history or loading earlier messages pauses following; **Latest messages ↓** resumes it.
 - A confirmed send clears only the submitted text and photos. New text typed during the request remains. Photo acknowledgements compare normalized image bytes; an uncertain result keeps the draft and never automatically resends it.
 - **Questions for you → View & reply** shows saved asynchronous questions, choices, and a typed-answer field. Answers go through Steer when active or Send when idle; disconnected answers explicitly queue. The panel closes when its final answer is accepted. Queued replies can be edited or deleted; a confirmed deletion permits answering that question afresh.
 - Model/effort choices apply to subsequent turns and are verified by readback. Permissions and global defaults are not changed.
@@ -78,7 +126,7 @@ The service runs `caffeinate -is` to prevent idle system sleep on battery and ch
 
 The sleep setting persists beyond stopping/uninstalling Companion and also blocks manual sleep. It does not change FileVault, automatic login, password requirements, or native authorization policy. A login LaunchAgent cannot run before login/FileVault unlock. Depleted power, shutdown, or an internet outage ends connectivity. Staying awake and native desktop interaction while locked are separate capabilities.
 
-The installed OpenAI Locked Use component was updated to match its bundled version. Earlier checks received ALLOW, but a later strict locked-console test received DENY; locked desktop interaction is not certified. Mac status shows the component and last check. Physical lid-close/mobile-data continuity and native desktop access must be checked separately on each Mac. Setup on a second Mac does not apply power or security settings automatically.
+The OpenAI Locked Use component can be current and enabled while an automatic unlock is refused. OpenAI scopes unlock to active trusted Computer Use turns and pauses it after local keyboard/pointer input until a manual unlock. The recovery procedure is to unlock manually once, confirm Locked use is enabled, lock again, and start a fresh native-app test from the phone. Companion cannot override that authorization or promise that it will never require manual recovery. A 2026-10-21 check reproduced the refusal, then successfully read native Chrome after a manual unlock and a new user-confirmed lock. This is a bounded test, not continuous certification. See the [official Locked Use guide](https://learn.chatgpt.com/docs/computer-use#locked-use). Mac status shows the component and last check. Physical lid-close/mobile-data continuity and native desktop access must be checked separately on each Mac. Setup on a second Mac does not apply power or security settings automatically.
 
 ## Architecture and safety boundaries
 
@@ -86,7 +134,7 @@ The installed OpenAI Locked Use component was updated to match its bundled versi
 - `desktop_runtime.py`: owner-routed IPC for bounded live snapshots, Send/Steer/model changes, and queue promotion. It validates the socket owner/mode, method versions, snapshot source/identity, and turn acknowledgements. It never claims ownership, resumes chats through an independent daemon, or forwards arbitrary caller-selected methods.
 - `runtime.py`, `new_chat.py`: read-only account queries and bounded queue, new-empty-chat, and naming APIs. A separate app-server never runs an existing chat. The existing native desktop owner starts the first question after the new chat and its destination are verified.
 - `access.py`, `inbox.py`, `photos.py`, `promotions.py`: Companion-owned private stores under `.state/`.
-- `web/`: the UI, with separate clipboard, queue controls, new-chat, appearance, status, refresh, update, and Markdown modules. `theme.css` owns light/dark design tokens and common typography; `style.css` retains layout and gesture sizing.
+- `web/`: the UI, with separate clipboard, queue controls, new-chat, appearance, status, refresh, update, conversation feedback/scrolling, and Markdown modules. `theme.css` owns light/dark design tokens and common typography; `style.css` retains layout and gesture sizing.
 - `system_status.py`: allowlisted tunnel health and freshness; `control.py` assembles component checks shared by the native app and authenticated web viewer.
 - `configuration.py`, `manage.py`, `service.py`, `control.py`, `build_app.py`, `native/`: per-Mac configuration, setup/export, supervision, and Raycast control app.
 
@@ -114,7 +162,7 @@ python3 manage.py bundle --output Desktop-Companion-source.zip
 
 Tests use isolated databases and fake desktop protocols. They cover authentication/CSRF, origin/TLS enforcement, read-only history, receipts and races, deduplication, exact-turn delivery, stale status overrides, photo normalization, queue promotion/retry, setup/export isolation, two refresh zones, clipboard behavior, draft-safe version updates, project verification, first-message retries, naming, theme persistence, status colors, and component freshness.
 
-The combined source passed **234 Python tests and 41 JavaScript tests** on 2026-10-21. Coverage includes scheduler-message filtering across historical pages/previews, normalized photo acknowledgements, revision-guarded queue edit/delete, retained attachments, composer clearing, final-answer panel dismissal, web-only restart isolation/backoff, origin preservation, live-connector preservation, lifecycle-log privacy/rotation, and the independent outage page. These results verify the covered local behavior; they do not establish public tunnel recovery.
+The combined source passed **238 Python tests and 47 JavaScript tests** on 2026-10-21. Coverage includes immediate delivery receipts, exact client-identity reconciliation, stale working-indicator removal, delayed-photo scroll following, non-overlapping reads, conditional transcript responses, confirmed retry recovery after a turn changes, scheduler-message filtering across historical pages/previews, normalized photo acknowledgements, revision-guarded queue edit/delete, retained attachments, composer clearing, final-answer panel dismissal, web-only restart isolation/backoff, origin preservation, live-connector preservation, lifecycle-log privacy/rotation, and the independent outage page. These results verify the covered local behavior; they do not establish public tunnel recovery.
 
 Live UI verification on 2026-10-21: a disposable photo message queued successfully and cleared the composer, then was edited in place with its photo retained and deleted before delivery. The queue and delivered history both contained zero copies afterward. The native app rebuilt/installed and both appearances were checked, restoring Match Mac. Neutral home cards, blue actions, queue previews, and header typography were checked in mobile layouts. Web-only deployment preserved the supervisor, awake guard, and tunnel controller; four edge connections and the protected public HTTP 401 remained after the hostname-preservation repair. A fresh startup record must match the configured hostname and a live controller to retain that approved origin; cold or stale starts still require normal activation.
 
