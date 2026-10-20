@@ -19,6 +19,7 @@ import uuid
 
 from runtime import RuntimeUnavailable, SharedRuntime, RpcClient
 from approvals import approval_views, pending_requests, response_for, ApprovalChanged
+from questions import live_question_ids
 
 
 def queue_input_matches(inputs,message,photos):
@@ -59,60 +60,23 @@ class QueueNotClaimed(RuntimeUnavailable):
     """No removal or steering request was made; an explicit retry is safe."""
 
 
-def verified_queued(client,thread_id,item):
-    page=client.call('thread/queue/list',{'threadId':thread_id,'limit':100})
-    queued=next((q for q in page.get('data',[]) if q.get('id')==item['id']),None)
-    if not queued:raise QueueNotClaimed('This message is no longer queued. Refresh the chat.')
-    inputs=queued.get('input',[])
-    def image_url(part):return part.get('url',part.get('image_url'))
-    if any(not isinstance(part,dict) or not (part.get('type')=='text' and isinstance(part.get('text'),str) and not part.get('text_elements') or part.get('type')=='localImage' and part.get('path') in item.get('photos',[]) or part.get('type')=='image' and image_url(part) in item.get('image_urls',[])) for part in inputs):
-        raise QueueNotClaimed('This queued message needs the desktop.')
-    text='\n'.join(part['text'] for part in inputs if part['type']=='text')
-    source_photos=[(part['type'],part.get('path') if part['type']=='localImage' else image_url(part)) for part in inputs if part['type'] in ('localImage','image')]
-    expected_photos=item.get('source_photos',[('localImage',path) for path in item.get('photos',[])])
-    if text!=item['text'] or source_photos!=expected_photos or queued.get('clientUserMessageId')!=item['client_id']:
-        raise QueueNotClaimed('This queued message was edited. Refresh before changing it.')
-    return queued
+QUEUE_GUARD_REASON='This desktop queue API cannot protect a concurrent edit. Manage queued messages on your Mac; the original has not been changed.'
 
 
 def change_queued_message(thread_id,item,message=None,*,executable=None,client_factory=RpcClient):
-    """Update in place or delete using the native queue API, without starting work."""
-    executable=executable or shutil.which('codex')
-    if not executable:raise QueueNotClaimed('The queue service is unavailable.')
-    with client_factory([executable,'app-server','--stdio'],timeout=8) as client:
-        queued=verified_queued(client,thread_id,item)
-        if message is None:
-            result=client.call('thread/queue/delete',{'threadId':thread_id,'queuedSubmissionId':item['id']})
-            if result.get('deleted') is not True:raise RuntimeUnavailable('The message may already have left the queue. Refresh before trying again.')
-            return {'state':'deleted','message':'Queued message deleted.'}
-        inputs=[{'type':'text','text':message,'text_elements':[]}]+[part for part in queued['input'] if part['type']!='text']
-        updated=client.call('thread/queue/update',{'threadId':thread_id,'queuedSubmissionId':item['id'],'input':inputs}).get('queuedSubmission',{})
-        if updated.get('id')!=item['id'] or updated.get('clientUserMessageId')!=item['client_id'] or not queue_input_matches(updated.get('input'),message,item.get('photos',[])):
-            raise RuntimeUnavailable('The queue update acknowledgement could not be verified. Refresh before trying again.')
-        return {'state':'updated','message':'Queued message updated. Attached photos were kept.' if item.get('photos') else 'Queued message updated.'}
+    # Current queue/update and queue/delete accept only an ID, with no content
+    # precondition. A preceding list or Companion lock cannot guard desktop edits.
+    raise QueueNotClaimed(QUEUE_GUARD_REASON)
 
 
 def claim_queued_message(thread_id,item,client_factory=RpcClient,executable=None):
-    """Use only queue APIs in this short-lived process; never load or run a thread."""
-    executable=executable or shutil.which('codex')
-    if not executable:raise QueueNotClaimed('The queue service is unavailable.')
-    delete_requested=False
-    try:
-        with client_factory([executable,'app-server','--stdio'],timeout=8) as client:
-            verified_queued(client,thread_id,item)
-            delete_requested=True
-            deleted=client.call('thread/queue/delete',{'threadId':thread_id,'queuedSubmissionId':item['id']})
-            if deleted.get('deleted') is not True:raise RuntimeUnavailable('The desktop already claimed this queued message. Check the conversation.')
-            return {'message':{'context':{'prompt':item['text']}}}
-    except (OSError,ValueError,RuntimeUnavailable) as error:
-        if not delete_requested:raise QueueNotClaimed(str(error) if isinstance(error,RuntimeUnavailable) else 'The queue service is unavailable. The message was not sent.') from error
-        raise
+    raise QueueNotClaimed(QUEUE_GUARD_REASON)
 
 
 class DesktopClient:
     VERSIONS = {'initialize': 0, 'thread-owner-discovery': 1,
                 'thread-follower-read-model-settings': 1,
-                'thread-follower-steer-turn': 1, 'thread-follower-start-turn': 2,
+                'thread-follower-start-turn': 2,
                 'thread-follower-command-approval-decision':1,
                 'thread-follower-file-approval-decision':1,
                 'thread-follower-permissions-request-approval-response':1,
@@ -197,6 +161,7 @@ class DesktopClient:
                 size=struct.unpack('<I',self._read(4,deadline))[0]
                 if not 0<size<=32*1024*1024:raise RuntimeUnavailable('Desktop state exceeded the supported size.')
                 value=json.loads(self._read(size,deadline))
+                if not isinstance(value,dict):raise RuntimeUnavailable('Unexpected desktop snapshot frame.')
                 params=value.get('params',{});change=params.get('change',{})
                 if value.get('type')!='broadcast' or value.get('sourceClientId')!=owner or value.get('method')!='thread-stream-state-changed' or value.get('version')!=11 or params.get('hostId')!='local' or params.get('conversationId')!=thread_id or change.get('type')!='snapshot':continue
                 state=change.get('conversationState',{})
@@ -216,10 +181,12 @@ class DesktopClient:
         if history.get('kind')=='canonical':turns=list(history.get('history',{}).get('entitiesByKey',{}).values())
         active=[t for t in turns if isinstance(t,dict) and t.get('status')=='inProgress' and t.get('turnId')]
         turn=max(active,key=lambda t:t.get('turnStartedAtMs') or 0,default={}).get('turnId')
+        latest=max(enumerate(turns),key=lambda pair:(pair[1].get('turnStartedAtMs') or 0,pair[0]),default=(0,{}))[1]
+        question_ids=live_question_ids(latest)
         result={'status':'working' if runtime=='active' else 'idle' if runtime=='idle' else 'unknown',
                 'turn_id':turn if runtime=='active' else None,'checked_at':int(time.time()*1000),
-                'approval_count':len([r for r in pending_requests(state) if r.get('params',{}).get('threadId')==thread_id])}
-        if include_approvals:result['approvals']=approval_views(state,owner,redact)
+                'approval_count':len([r for r in pending_requests(state) if r.get('params',{}).get('threadId')==thread_id]),'question_count':len(question_ids)}
+        if include_approvals:result['approvals']=approval_views(state,owner,redact);result['async_question_ids']=question_ids
         return result
 
     def __enter__(self):return self
@@ -270,11 +237,12 @@ class DesktopRuntime:
                 owner, settings = self.owner(client, thread_id)
                 execution=client.execution_state(thread_id,owner,include_approvals=True,redact=self.approval_redactor)
             active = execution['status']=='working' and bool(execution['turn_id'])
-            return {**value, 'steer': active, 'send_now': execution['status']=='idle', 'queue_steer':active and self.promotions is not None, 'model_selection':True,'connected': True,'execution':execution,
-                    'reason': 'Connected to the desktop chat.', 'model': settings.get('model'),
+            atomic_steer=active and self.shared.capabilities(thread_id).get('steer') is True
+            return {**value, 'steer': atomic_steer, 'steer_reason':'Steer requires a shared desktop channel that atomically checks the turn. Use Queue or the Mac app on this version.' if active and not atomic_steer else '', 'send_now': execution['status']=='idle', 'queue_steer':False, 'model_selection':True,'connected': True,'execution':execution,
+                    'reason': 'Connected to the desktop chat.' if not active or atomic_steer else 'Queue is available. This desktop version needs the Mac app for safe turn-bound Steer.', 'model': settings.get('model'),
                     'effort': settings.get('reasoningEffort'),
                     'model_reason': 'Connected. Model and reasoning changes apply to subsequent turns in this chat.'}
-        except (OSError, ValueError, KeyError, RuntimeUnavailable):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeUnavailable):
             return value
 
     def execution_state(self,thread_id):
@@ -282,7 +250,7 @@ class DesktopRuntime:
             with self.client(timeout=1) as client:
                 owner,_=self.owner(client,thread_id)
                 return client.execution_state(thread_id,owner)
-        except (OSError,ValueError,KeyError,RuntimeUnavailable):
+        except (OSError,ValueError,KeyError,TypeError,AttributeError,RuntimeUnavailable):
             return {'status':'unknown','turn_id':None,'checked_at':int(time.time()*1000)}
 
     def respond_approval(self,thread_id,identity,revision,choice,answers):
@@ -309,23 +277,15 @@ class DesktopRuntime:
                             'fileAttachments': [], 'imageAttachments': [], 'ideContext': None}}
 
     def steer(self, thread_id, message, expected_turn_id,photos=None):
+        # The follower IPC handler retries a turn mismatch into the new active
+        # turn. Only turn/steer on an existing shared channel has the guard.
+        if not self.shared.present():raise RuntimeUnavailable('Safe turn-bound steering is unavailable on this desktop version. Use Queue or Steer on your Mac.')
         with self.client() as client:
-            owner, _ = self.owner(client, thread_id)
-            thread = self.thread_reader(thread_id)
+            owner,_=self.owner(client,thread_id)
             execution=client.execution_state(thread_id,owner)
-            if thread.get('archived') or execution['status']!='working' or execution['turn_id']!=expected_turn_id:
+            if self.thread_reader(thread_id).get('archived') or execution['status']!='working' or execution['turn_id']!=expected_turn_id:
                 raise RuntimeUnavailable('The active turn changed. Refresh before steering.')
-            identity = str(uuid.uuid4())
-            response = client.call('thread-follower-steer-turn', {
-                'conversationId': thread_id, 'input': [{'type': 'text', 'text': message, 'text_elements': []}]+[{'type':'localImage','path':path} for path in photos or []],
-                'clientUserMessageId': identity, 'restoreMessage': self.restore(thread, message, identity),
-                'attachments': [], 'serviceTier': None,
-            }, target=owner)
-            result = response.get('result', {}).get('result', {})
-            if result.get('turnId') != expected_turn_id:
-                raise RuntimeUnavailable('The desktop turn changed during submission. Check the conversation before retrying.')
-            return {'state': 'steered', 'turn_id': result['turnId'], 'client_id': identity,
-                    'message': 'Accepted by the active desktop turn. This was not added to the follow-up queue.'}
+        return self.shared.steer(thread_id,message,expected_turn_id,photos=photos,client_id=str(uuid.uuid4()))
 
     def send_now(self, thread_id, message,photos=None):
         with self.client() as client:
@@ -364,43 +324,4 @@ class DesktopRuntime:
         return self.promotions.pending(thread_id,self.receipt_reader,redact) if self.promotions and self.receipt_reader else []
 
     def promote_queued(self,thread_id,item,expected_turn_id):
-        if not self.promotions or not self.queue_reader:raise RuntimeUnavailable('Queue promotion is unavailable.')
-        try:client=self.client()
-        except (OSError,ValueError,RuntimeUnavailable) as error:raise QueueNotClaimed('Desktop connection is unavailable. The message is still queued; reconnect and retry.') from error
-        with client:
-            try:
-                owner,_=self.owner(client,thread_id)
-                execution=client.execution_state(thread_id,owner)
-                if execution['status']!='working' or execution['turn_id']!=expected_turn_id:
-                    raise RuntimeUnavailable('The active turn changed. The message is still queued.')
-            except (OSError,ValueError,RuntimeUnavailable) as error:raise QueueNotClaimed(str(error)) from error
-            if self.receipt_reader and self.receipt_reader(thread_id,item['client_id']):raise RuntimeUnavailable('This message is already recorded in the conversation. It was not sent again.')
-            self.promotions.prepare(thread_id,item)
-            try:
-                removed=self.queue_claimer(thread_id,item)
-                if not isinstance(removed,dict):raise RuntimeUnavailable('The desktop could not claim this queued message. Check the conversation before retrying.')
-                self.promotions.stage(item['id'],'claimed')
-                try:self.queue_reader(thread_id,item['id'])
-                except KeyError:pass
-                else:raise RuntimeUnavailable('The message is still in the desktop queue. It was not sent again.')
-                prompt=removed.get('message',{}).get('context',{}).get('prompt')
-                if isinstance(prompt,str) and prompt!=item['text']:
-                    self.promotions.stage(item['id'],'unknown',prompt)
-                    raise RuntimeUnavailable('The queued message changed while being claimed. Its text is saved for review below.')
-                # Claim first; never send a copy while the original remains eligible for execution.
-                thread=self.thread_reader(thread_id);execution=client.execution_state(thread_id,owner)
-                if execution['status']!='working' or execution['turn_id']!=expected_turn_id:
-                    raise RuntimeUnavailable('The turn ended during promotion. The message is saved for review below; it was not resent.')
-                restore=self.restore(thread,item['text'],item['client_id']);restore['serverQueuedMessageId']=item['id']
-                response=client.call('thread-follower-steer-turn',{'conversationId':thread_id,'input':[{'type':'text','text':item['text'],'text_elements':[]}]+[{'type':'localImage','path':path} for path in item.get('photos',[])],
-                    'clientUserMessageId':item['client_id'],'restoreMessage':restore,'attachments':[],'serviceTier':None},target=owner)
-                result=response.get('result',{}).get('result',{})
-                if result.get('turnId')!=expected_turn_id:raise RuntimeUnavailable('Queue promotion acknowledgement is unconfirmed. Check the saved message below before retrying.')
-                self.promotions.stage(item['id'],'sent')
-                return {'state':'steered','turn_id':result['turnId'],'client_id':item['client_id'],'message':'Moved this queued message into the active turn. It is no longer waiting in the queue.'}
-            except QueueNotClaimed:
-                self.promotions.stage(item['id'],'not_claimed')
-                raise
-            except (OSError,ValueError,RuntimeUnavailable):
-                self.promotions.stage(item['id'],'unknown')
-                raise RuntimeUnavailable('Queue promotion is unconfirmed. The original text is saved for review; it will never be resent automatically.')
+        raise QueueNotClaimed(QUEUE_GUARD_REASON)

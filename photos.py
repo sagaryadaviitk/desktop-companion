@@ -41,6 +41,8 @@ def image_size(data):
 class PhotoStore:
     MAX_BYTES=4*1024*1024
     MAX_PHOTOS=3
+    DRAFT_SECONDS=7*24*60*60
+    STORAGE_BYTES=128*1024*1024
 
     def __init__(self,root,runner=subprocess.run):
         self.root=Path(root).resolve();self.root.mkdir(parents=True,exist_ok=True,mode=0o700);self.root.chmod(0o700)
@@ -62,11 +64,12 @@ class PhotoStore:
         if not 0<width<=4096 or not 0<height<=4096 or width*height>8_000_000:
             raise PhotoError('This photo is too large. Resize it before trying again.')
         with self.lock:
+            self.expire_drafts()
             with closing(sqlite3.connect(self.db)) as db:
                 pending=db.execute('SELECT COUNT(*) FROM photos WHERE owner=? AND submitted=0',(owner,)).fetchone()[0]
-            if pending>=20:raise PhotoError('Too many unsent photos. Remove photos from your other drafts first.')
-            if sum(p.stat().st_size for p in self.root.glob('*.jpg'))>128*1024*1024:
-                raise PhotoError('Photo storage is full. Use the desktop app for this attachment.')
+            if pending>=20:raise PhotoError('Too many unsent photos. Open … → Photo storage to review and remove abandoned drafts.')
+            if sum(p.stat().st_size for p in self.root.glob('*.jpg'))>=self.STORAGE_BYTES:
+                raise PhotoError('Photo storage is full. Open … → Photo storage. Sent or unconfirmed attachments are protected.')
             identity=uuid.uuid4().hex;source=self.root/(identity+'.input');target=self.root/(identity+'.jpg')
             try:
                 with open(source,'xb') as handle:os.chmod(source,0o600);handle.write(data)
@@ -76,6 +79,7 @@ class PhotoStore:
                 if result.returncode!=0 or not target.is_file():raise PhotoError('This photo could not be decoded. Choose another photo.')
                 target.chmod(0o600);canonical=target.read_bytes();image_size(canonical)
                 if len(canonical)>self.MAX_BYTES:raise PhotoError('This photo is too large after processing. Choose a smaller photo.')
+                if sum(p.stat().st_size for p in self.root.glob('*.jpg'))>self.STORAGE_BYTES:raise PhotoError('Photo storage is full. Review unsent photos under … → Photo storage.')
                 name=Path(str(name or 'Photo')).name
                 name=re.sub(r'[\x00-\x1f\x7f]','',name)[:80] or 'Photo'
                 with closing(sqlite3.connect(self.db)) as db,db:
@@ -104,7 +108,33 @@ class PhotoStore:
 
     def submit(self,identifiers):
         with self.lock,closing(sqlite3.connect(self.db)) as db,db:
+            for identity in identifiers:
+                path=self.root/(identity+'.jpg')
+                if not db.execute('SELECT 1 FROM photos WHERE id=?',(identity,)).fetchone() or path.is_symlink() or not path.is_file():raise PhotoError('A draft photo was removed or expired. Attach it again before sending.')
             db.executemany('UPDATE photos SET submitted=1 WHERE id=?',[(i,) for i in identifiers])
+
+    def expire_drafts(self,now=None):
+        """Only week-old unsubmitted drafts expire; submitted/uncertain files stay."""
+        cutoff=(time.time() if now is None else now)-self.DRAFT_SECONDS
+        with self.lock,closing(sqlite3.connect(self.db)) as db,db:
+            for identity, in db.execute('SELECT id FROM photos WHERE submitted=0 AND created<?',(cutoff,)).fetchall():
+                (self.root/(identity+'.jpg')).unlink(missing_ok=True)
+                db.execute('DELETE FROM photos WHERE id=? AND submitted=0',(identity,))
+
+    def storage(self,owner):
+        with self.lock,closing(sqlite3.connect(self.db)) as db:
+            rows=db.execute('SELECT id,thread_id,name,created FROM photos WHERE owner=? AND submitted=0 ORDER BY created',(owner,)).fetchall()
+            protected=[i for i, in db.execute('SELECT id FROM photos WHERE submitted=1')]
+            size=lambda identity:(self.root/(identity+'.jpg')).stat().st_size if (self.root/(identity+'.jpg')).is_file() else 0
+            return {'used_bytes':sum(p.stat().st_size for p in self.root.glob('*.jpg')),'capacity_bytes':self.STORAGE_BYTES,
+                    'protected_bytes':sum(size(i) for i in protected),'draft_days':self.DRAFT_SECONDS//86400,
+                    'drafts':[{**self.public(i,name),'created_at':created} for i,_,name,created in rows]}
+
+    def remove_draft(self,identity,owner):
+        if not isinstance(identity,str) or not re.fullmatch(r'[a-f0-9]{32}',identity):raise PhotoError('Invalid photo.')
+        with self.lock,closing(sqlite3.connect(self.db)) as db:
+            row=db.execute('SELECT thread_id FROM photos WHERE id=? AND owner=? AND submitted=0',(identity,owner)).fetchone()
+            if row:self.remove(identity,row[0],owner)
 
     def bind_draft(self,identifiers,draft,thread,owner):
         """Move only this browser's unsent draft photos; retries keep the same binding."""

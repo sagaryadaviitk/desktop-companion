@@ -196,8 +196,10 @@ class SharedRuntime:
 
     def present(self):
         try:
-            info = self.socket.stat()
-            return bool(self.executable and info.st_uid == os.getuid() and stat.S_ISSOCK(info.st_mode))
+            info = self.socket.lstat();directory=self.socket.parent.stat()
+            return bool(self.executable and info.st_uid == directory.st_uid == os.getuid()
+                        and stat.S_ISDIR(directory.st_mode) and not directory.st_mode & 0o022
+                        and stat.S_ISSOCK(info.st_mode) and not info.st_mode & 0o077)
         except OSError:
             return False
 
@@ -229,14 +231,15 @@ class SharedRuntime:
         except (OSError, RuntimeUnavailable):
             return value
 
-    def steer(self, thread_id, message, expected_turn_id):
+    def steer(self, thread_id, message, expected_turn_id,photos=None,client_id=None):
         with self.client() as client:
             self.loaded(client, thread_id)
-            result = client.call("turn/steer", {"threadId": thread_id, "expectedTurnId": expected_turn_id,
-                                                "input": [{"type": "text", "text": message}]})
+            params={"threadId":thread_id,"expectedTurnId":expected_turn_id,"input":[{"type":"text","text":message}]+[{'type':'localImage','path':p} for p in photos or []]}
+            if client_id:params['clientUserMessageId']=client_id
+            result=client.call("turn/steer",params)
             if result.get("turnId") != expected_turn_id:
                 raise RuntimeUnavailable("Steering acknowledgement could not be verified. Check the desktop before retrying.")
-            return {"state": "steered", "message": "Sent to the active turn. Completion is not yet confirmed."}
+            return {"state": "steered", **({"client_id":client_id} if client_id else {}), "turn_id":expected_turn_id, "message": "Sent to the active turn. Completion is not yet confirmed."}
 
     def set_model(self, thread_id, model, effort=None):
         with self.client() as client:

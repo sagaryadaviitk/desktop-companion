@@ -339,3 +339,8 @@ html {background:var(--bg)}
  html[data-standalone=true],html[data-standalone=true] body {overscroll-behavior-y:none}
  html[data-standalone=true] body {position:fixed;inset:0 0 auto;top:var(--viewport-top,0px);overflow:hidden}
 }
+
+.photo-storage-row {display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}
+.photo-storage-row img {width:48px;height:48px;object-fit:cover;border-radius:9px}
+.photo-storage-row span {flex:1;min-width:0;overflow-wrap:anywhere;font-size:13px;color:var(--muted)}
+.photo-storage-row button {min-height:44px}

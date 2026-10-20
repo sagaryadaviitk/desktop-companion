@@ -15,7 +15,7 @@ window.CompanionConversation={
     for(const [id,item]of entries)if(item.thread===thread&&recorded.has(item.client_id))entries.delete(id);
     return [...entries.values()].filter(item=>item.thread===thread);
    },
-   hasPending(){return entries.size>0;},
+   hasPending(){return [...entries.values()].some(item=>item.state==='sending');},
    reset(){entries.clear();}
   };
  },

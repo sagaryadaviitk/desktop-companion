@@ -8,7 +8,7 @@ import threading
 import unittest
 
 from companion import CompanionServer, CommandJournal, ControlError
-from questions import answer_envelope, pending_questions, replies
+from questions import answer_envelope, pending_questions, replies, live_question_ids
 from test_companion import CHAT, make_history
 from runtime import RuntimeUnavailable
 
@@ -16,6 +16,7 @@ from runtime import RuntimeUnavailable
 class QuestionTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.history=make_history(self.root)
+        with sqlite3.connect(self.root/'thread_history_1.sqlite') as db:db.execute("UPDATE thread_turns SET status='inProgress'")
         self.add('call-question','agentMessage',{'type':'agentMessage','delivery':'async','questions':[{'title':'Where should it work?','options':['Anywhere','At home']},{'title':'Any details?','options':None}]},5)
 
     def tearDown(self):self.temp.cleanup()
@@ -45,6 +46,16 @@ class QuestionTests(unittest.TestCase):
         self.add('receipt','userMessage',{'content':[{'type':'text','text':answer_envelope(self.questions()[0],'Please keep it simple')} ]},8)
         self.assertEqual(self.questions(),[])
 
+    def test_completed_interrupted_and_new_turns_clear_old_question_counts_and_panels(self):
+        for status in ['completed','interrupted','failed']:
+            with sqlite3.connect(self.root/'thread_history_1.sqlite') as db:db.execute('UPDATE thread_turns SET status=?',(status,))
+            self.assertEqual(self.questions(),[]);self.assertEqual(self.history.list_threads()[0]['question_count'],0)
+        with sqlite3.connect(self.root/'thread_history_1.sqlite') as db:
+            db.execute("INSERT INTO thread_turns VALUES (?, 'new-turn', 'inProgress', 2, NULL, 20)",(CHAT,))
+        self.assertEqual(self.questions(),[])
+        self.add('new-question','agentMessage',{'delivery':'async','questions':[{'title':'A current question?','options':['Yes']}]},21)
+        self.assertEqual(len(self.questions()),1);self.assertEqual(self.questions()[0]['title'],'A current question?')
+
     def test_reply_in_another_chat_does_not_resolve_this_question(self):
         with sqlite3.connect(self.root/'thread_history_1.sqlite') as db:
             db.execute('INSERT INTO thread_items VALUES (?,?,?,?,?,?,?,?)',('another','reply','userMessage',json.dumps({'content':[{'type':'text','text':answer_envelope(self.questions()[0],'Yes')}]}),1006,None,None,6))
@@ -62,6 +73,17 @@ class QuestionTests(unittest.TestCase):
         encoded=json.dumps(self.questions());self.history.list_threads()
         self.assertNotIn('github_pat_',encoded);self.assertNotIn('sk-aaaa',encoded)
         self.assertEqual(before,hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_live_owner_question_lifecycle_keeps_active_questions_but_clears_terminal_turns(self):
+        item={'id':'call','type':'agentMessage','delivery':'async','questions':[{'title':'One?'},{'title':'Two?'}]}
+        turn={'turnId':'turn','status':'inProgress','items':[item]}
+        ids=live_question_ids(turn);self.assertEqual(len(ids),2)
+        response=answer_envelope({'id':ids[0],'title':'One?'},'Answered')
+        reply={'type':'steeringUserMessage','status':'pending','input':[{'type':'text','text':response}]}
+        turn['items'].append(reply);self.assertEqual(live_question_ids(turn),ids)
+        reply['status']='accepted';self.assertEqual(live_question_ids(turn),[ids[1]])
+        turn['items'].append({'type':'agentMessage','text':'I am continuing.'});self.assertEqual(live_question_ids(turn),[ids[1]])
+        turn['status']='completed';self.assertEqual(live_question_ids(turn),[])
 
 
 class AnswerHttpTests(QuestionTests):
@@ -109,6 +131,16 @@ class AnswerHttpTests(QuestionTests):
     def test_already_answered_question_cannot_receive_new_reply(self):
         payload=self.payload();self.add('desktop-answer','userMessage',{'content':[{'type':'text','text':answer_envelope(self.questions()[0],'Already answered on Mac')}]},6)
         self.assertEqual(self.post(payload)[0],409);self.assertEqual(self.calls,[])
+
+    def test_live_desktop_progress_clears_saved_question_and_rejects_late_reply(self):
+        payload=self.payload()
+        class Live:
+            def capabilities(self,_):return {'connected':True,'execution':{'async_question_ids':[],'question_count':0}}
+        self.server.runtime=Live()
+        self.assertEqual(self.post(payload)[0],409);self.assertEqual(self.calls,[])
+        c=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=3)
+        c.request('GET','/api/chat?id='+CHAT);r=c.getresponse();value=json.loads(r.read());c.close()
+        self.assertEqual(value['questions'],[])
 
     def test_lost_ack_is_never_resent(self):
         self.fail=True;payload=self.payload();self.assertEqual(self.post(payload)[1]['state'],'unknown');self.assertEqual(self.post(payload)[1]['state'],'unknown');self.assertEqual(len(self.calls),1)

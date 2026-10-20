@@ -65,5 +65,5 @@ jobs:
         run: >-
           xcrun swiftc -O -swift-version 5 -parse-as-library
           -module-cache-path "$RUNNER_TEMP/swift-cache"
-          native/CompanionApp.swift native/Appearance.swift native/SystemMap.swift
+          native/CompanionApp.swift native/Appearance.swift native/SystemMap.swift native/ControlPolicies.swift
           -o "$RUNNER_TEMP/DesktopCompanion"

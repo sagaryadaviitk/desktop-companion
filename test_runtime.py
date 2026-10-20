@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import socket
 from unittest.mock import patch
 
 from runtime import AccountMonitor, SharedRuntime, RuntimeUnavailable, usage_snapshot, model_catalog
@@ -71,6 +72,17 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(runtime.capabilities('test')['steer'])
             with self.assertRaises(RuntimeUnavailable):runtime.steer('test','hello','turn')
             with self.assertRaises(RuntimeUnavailable):runtime.set_model('test','model')
+
+    def test_shared_control_socket_rejects_symlinks_and_writable_parent_or_endpoint(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temp:
+            runtime=SharedRuntime(temp,executable='test-cli');runtime.socket.parent.mkdir(mode=0o700)
+            with socket.socket(socket.AF_UNIX) as endpoint:
+                endpoint.bind(str(runtime.socket));runtime.socket.chmod(0o600)
+                self.assertTrue(runtime.present())
+                runtime.socket.chmod(0o666);self.assertFalse(runtime.present());runtime.socket.chmod(0o600)
+                runtime.socket.parent.chmod(0o777);self.assertFalse(runtime.present());runtime.socket.parent.chmod(0o700)
+                actual=runtime.socket.parent/'actual.sock';runtime.socket.rename(actual);runtime.socket.symlink_to(actual)
+                self.assertFalse(runtime.present())
 
     def client(self,loaded=True,active=True,ack='turn-1'):
         calls=[]

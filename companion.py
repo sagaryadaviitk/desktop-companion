@@ -284,10 +284,12 @@ class History:
     def questions_by_thread(connection, identifiers):
         result={}
         for identifier in identifiers:
+            turn=connection.execute('SELECT status,rollout_ordinal FROM thread_turns WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1',(identifier,)).fetchone()
+            if not turn or turn['status']!='inProgress':result[identifier]=[];continue
             rows=connection.execute("SELECT item_id,item_type,item_json,created_at_ms FROM thread_items "
-                                    "WHERE thread_id=? AND (item_type='agentMessage' AND item_json LIKE '%\"questions\"%' "
+                                    "WHERE thread_id=? AND rollout_ordinal>=? AND (item_type='agentMessage' AND item_json LIKE '%\"questions\"%' "
                                     "OR item_type IN ('userMessage','steeringUserMessage') AND item_json LIKE '%send_user_message_question_reply%') "
-                                    "ORDER BY rollout_ordinal",(identifier,)).fetchall()
+                                    "ORDER BY rollout_ordinal",(identifier,turn['rollout_ordinal'])).fetchall()
             result[identifier]=pending_questions(rows,redact)
         return result
 
@@ -423,8 +425,8 @@ class History:
             plain=isinstance(client,str) and bool(THREAD_ID.fullmatch(client)) and supported
             answers=question_replies(text)
             pending.append({"id": row["id"], "text": redact(text)[:8000], "timestamp": row["created_at_ms"],
-                            'photos':photos,'attachment_count':sum(1 for part in content if isinstance(part,dict) and part.get('type') in ('image','localImage')),'revision':hashlib.sha256(row['payload_json'].encode()).hexdigest(),'can_steer':bool(plain) and bool(text.strip()) and len(text)<=8000 and len(photos)<=PhotoStore.MAX_PHOTOS,
-                            'can_edit':bool(plain) and len(text)<=8000 and len(answers)<=1,'can_delete':bool(plain),
+                            'photos':photos,'attachment_count':sum(1 for part in content if isinstance(part,dict) and part.get('type') in ('image','localImage')),'revision':hashlib.sha256(row['payload_json'].encode()).hexdigest(),'can_steer':False,
+                            'can_edit':False,'can_delete':False,'controls_reason':'Manage this queue on your Mac. This desktop version cannot protect concurrent edits from mobile.',
                             'editable_text':redact(answers[0]['answer'] if len(answers)==1 else text)[:8000],
                             'answer':bool(answers)})
         return pending
@@ -730,6 +732,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"remote": self.server.remote, "authenticated": bool(session) if self.server.remote else True})
             if self.server.remote and not session:
                 return self.reply(401, {"error": "Pair this browser before viewing conversations.", "auth_required": True})
+            if parsed.path=='/api/photos/storage' and self.server.photos:
+                return self.reply(200,self.server.photos.storage(session['id'] if session else 'local'))
             if parsed.path.startswith('/api/photos/') and self.server.photos:
                 try:return self.reply(200,self.server.photos.read(parsed.path.removeprefix('/api/photos/'),session['id'] if session else 'local'),'image/jpeg')
                 except (KeyError,FileNotFoundError):return self.reply(404,{'error':'Photo unavailable.'})
@@ -786,6 +790,8 @@ class Handler(BaseHTTPRequestHandler):
                         question['delivery']=attempt['state']
                 value["control"] = self.server.bridge.describe(thread_id)
                 value['control']['live']=self.server.runtime.capabilities(thread_id) if self.server.runtime and value['control']['available'] and not value['archived'] else {'steer':False,'model_selection':False,'reason':SharedRuntime.REASON}
+                active_questions=value['control']['live'].get('execution',{}).get('async_question_ids')
+                if isinstance(active_questions,list):value['questions']=[q for q in value['questions'] if q['id'] in active_questions]
                 for approval in value['control']['live'].get('execution',{}).get('approvals',[]):
                     attempt=self.server.journal.lookup('approval-'+approval_digest([thread_id,approval['id'],approval['revision']]))
                     if attempt:approval['response_state']=attempt['state'];approval['response_message']=attempt['message']
@@ -835,6 +841,11 @@ class Handler(BaseHTTPRequestHandler):
                 try:self.server.new_chat.opener(thread['id'])
                 except (OSError,subprocess.SubprocessError):return self.reply(503,{'error':'The desktop app could not open this chat. Your messages have not been sent.'})
                 return self.reply(200,{'state':'opening','message':'Opening this chat in the desktop app. Live controls will reconnect as it loads.'})
+            if self.path=='/api/photos/drafts/remove':
+                if not self.server.photos or not self.server.bridge.availability()['available']:raise PhotoError('Photo changes are unavailable in this viewer.')
+                payload=self.read_payload()
+                self.server.photos.remove_draft(payload.get('photo_id'),session['id'] if session else 'local')
+                return self.reply(200,{'removed':True})
             if self.path == '/api/chats/create':
                 if not self.server.new_chat or not self.server.bridge.availability()['available']:
                     return self.reply(409,{'error':'New chat is unavailable in this viewer.'})
@@ -946,6 +957,9 @@ class Handler(BaseHTTPRequestHandler):
                         raise ControlError('A reply to this question is already in the desktop queue. Check the chat before replying again.')
                     envelope=answer_envelope(question,canonical['answer'])
                     live=self.server.runtime.capabilities(thread_id) if self.server.runtime else {}
+                    active_questions=live.get('execution',{}).get('async_question_ids')
+                    if isinstance(active_questions,list) and question_id not in active_questions:
+                        raise ControlError('This question is no longer open on your Mac. Refresh the chat; no reply was sent.')
                     try:
                         if live.get('steer'):
                             result=self.server.runtime.steer(thread_id,envelope,(live.get('execution') or thread['last_recorded_turn'])['turn_id'])
@@ -955,7 +969,7 @@ class Handler(BaseHTTPRequestHandler):
                             result['message']='Your answer was sent and the next desktop turn started.'
                         else:
                             result=self.server.bridge.send(thread_id,envelope)
-                            result['message']='Reply queued because live controls are disconnected. It may wait until this turn finishes.'
+                            result['message']='Reply queued. Direct delivery to this active turn is unavailable; it may wait until the turn finishes.'
                     except RuntimeUnavailable as error:raise ControlError(str(error),uncertain=True) from error
                     return result
                 try:result=self.server.journal.execute(identity,canonical,send_answer)
