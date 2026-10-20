@@ -6,7 +6,7 @@ const vm=require('node:vm');
 const source=fs.readFileSync(__dirname+'/web/refresh.js','utf8');
 
 function fixture(refresh=async()=>true){
-  const listeners={},nodes={},states=new Set(['ready']);let blocked=false,mobile=true,standalone=false;const haptics=[];
+  const listeners={},nodes={},states=new Set(['ready']);let blocked=false,mobile=true,standalone=false,reloads=0,requestReload=()=>true;const haptics=[];
   class Element {
     constructor(){this.scrollTop=0;this.listeners={};this.attributes={};this.hidden=false;this.classList={toggle(){}};}
     addEventListener(name,callback){this.listeners[name]=callback;}
@@ -20,9 +20,9 @@ function fixture(refresh=async()=>true){
     querySelector:selector=>selector==='.topbar'?{getBoundingClientRect:()=>({bottom:53})}:states.has('dialog')?{}:null,
     addEventListener:(name,callback,options)=>{listeners[name]=callback;listeners[name+'Options']=options;}};
   const context={window:{},document,Element,setTimeout:()=>1,clearTimeout(){}};vm.runInNewContext(source,context);
-  const controller=context.window.CompanionRefresh.install({refresh,isMobile:()=>mobile,isStandalone:()=>standalone,haptic:kind=>haptics.push(kind)});
+  const controller=context.window.CompanionRefresh.install({refresh,reload:()=>{reloads++;return requestReload();},isMobile:()=>mobile,isStandalone:()=>standalone,haptic:kind=>haptics.push(kind)});
   function event(x=10,y=10,count=1,cancelable=true){return {target:nodes.panel,touches:Array.from({length:count},()=>({clientX:x,clientY:y})),cancelable,preventDefault(){this.prevented=true;}};}
-  return {listeners,nodes,states,controller,event,block:()=>blocked=true,desktop:()=>mobile=false,app:()=>standalone=true,haptics};
+  return {listeners,nodes,states,controller,event,context,reloads:()=>reloads,useReload:fn=>requestReload=fn,block:()=>blocked=true,desktop:()=>mobile=false,app:()=>standalone=true,haptics};
 }
 
 test('a downward pull at the panel top refreshes once on release and cancels a card click',async()=>{
@@ -82,15 +82,37 @@ test('an interrupted refresh recovers the button and keeps an actionable status'
   assert.equal(f.nodes['pull-refresh-label'].textContent,'Couldn’t refresh. Try again.');
 });
 
-test('Home Screen header pulls refresh at any reader position while browser-tab header pulls remain native',async()=>{
+test('Home Screen header pulls reload the full page while browser-tab headers remain native',async()=>{
  for(const standalone of [false,true]){
   let count=0;const f=fixture(async()=>{count++;return true;});if(standalone)f.app();f.nodes.panel.scrollTop=800;
   f.nodes.panel.closest=selector=>selector.startsWith('.topbar')?f.nodes.panel:null;
   f.listeners.touchstart(f.event());const move=f.event(10,120);f.listeners.touchmove(move);await f.listeners.touchend(f.event());
-  assert.equal(count,standalone?1:0);assert.equal(move.prevented,standalone?true:undefined);
-  assert.deepEqual(f.haptics,standalone?['armed','complete']:[]);
+  assert.equal(count,0);assert.equal(f.reloads(),standalone?1:0);assert.equal(move.prevented,standalone?true:undefined);
+  assert.deepEqual(f.haptics,standalone?['armed']:[]);if(standalone)assert.equal(f.nodes['pull-refresh-label'].textContent,'Reloading app…');
  }
 });
 test('refresh button requests start and completion feedback only for the explicit user refresh',async()=>{
  const f=fixture();await f.nodes['manual-refresh'].listeners.click();assert.deepEqual(f.haptics,['start','complete']);
+});
+
+function headerPull(f,mode='full'){
+ f.app();f.nodes.panel.closest=selector=>selector.startsWith('.topbar')?f.nodes.panel:null;
+ f.listeners.touchstart(f.event());
+ f.listeners.touchmove(mode==='short'?f.event(10,45):mode==='horizontal'?f.event(120,20):f.event(10,120));
+ if(mode==='cancel')f.listeners.touchcancel();
+ return f.listeners.touchend(f.event());
+}
+test('short, horizontal and cancelled Home Screen header pulls never reload',async()=>{
+ for(const mode of ['short','horizontal','cancel']){const f=fixture();await headerPull(f,mode);assert.equal(f.reloads(),0,mode);}
+});
+test('header full reload shares the real draft and in-flight guards and never falls back to soft refresh',async()=>{
+ for(const [busy,draft,confirmed,navigation] of [[true,false,true,0],[false,true,false,0],[false,true,true,1],[false,false,false,1]]){
+  let soft=0,reloaded=0,warnings=0;const f=fixture(async()=>{soft++;return true;});
+  f.nodes['update-banner']={hidden:true};f.nodes['update-reload']={addEventListener(){}};
+  vm.runInNewContext(fs.readFileSync(__dirname+'/web/updates.js','utf8'),f.context);
+  const updates=f.context.window.CompanionUpdates.install({loadedBuild:'a'.repeat(16),hasDraft:()=>draft,isBusy:()=>busy,isInteracting:()=>false,onBusy:()=>warnings++,reload:()=>reloaded++,confirmReload:()=>confirmed});
+  f.useReload(updates.reload);await headerPull(f);
+  assert.equal(f.reloads(),1);assert.equal(reloaded,navigation);assert.equal(soft,0);assert.equal(warnings,busy?1:0);
+  assert.equal(f.nodes['pull-refresh'].hidden,navigation===0);
+ }
 });
