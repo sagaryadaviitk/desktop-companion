@@ -1,11 +1,11 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const vm=require('node:vm');
 const source=fs.readFileSync(__dirname+'/web/attachments.js','utf8');
 function fixture(read){
- const nodes={},errors=[],added=[];let enabled=true,context='chat-a';
+ const nodes={},errors=[],added=[],repainted=[];let enabled=true,context='chat-a';
  for(const id of ['photo-menu','add-photo','choose-photo','photo-input','instruction','paste-photo'])nodes[id]={hidden:true,listeners:{},attributes:{},files:[],addEventListener(n,f){this.listeners[n]=f;},setAttribute(n,v){this.attributes[n]=v;},click(){this.clicked=true;},contains(){return false;},focus(){this.focused=true;}};
  const root={window:{},document:{getElementById:id=>nodes[id],addEventListener(){}},navigator:{clipboard:{read}},File:class {constructor(parts,name,options){Object.assign(this,{parts,name,...options});}}};
- vm.runInNewContext(source,root);root.window.CompanionAttachments.install({addFiles:async files=>added.push(...files),canAdd:()=>enabled,onError:e=>errors.push(e),getContext:()=>context});
- return {nodes,errors,added,api:root.window.CompanionAttachments,disable(){enabled=false;},switch(){context='chat-b';}};
+ vm.runInNewContext(source,root);root.window.CompanionShell={repaintCaret:input=>repainted.push(input)};root.window.CompanionAttachments.install({addFiles:async files=>added.push(...files),canAdd:()=>enabled,onError:e=>errors.push(e),getContext:()=>context});
+ return {nodes,errors,added,repainted,api:root.window.CompanionAttachments,disable(){enabled=false;},switch(){context='chat-b';}};
 }
 test('native image paste uses shared uploader and never fetches HTML images',()=>{
  const f=fixture();const file={type:'image/png'};let prevented=false;
@@ -27,4 +27,9 @@ test('explicit paste reads only on user action, reports permission failures, and
 test('offline paste cannot upload and plus menu keeps separate library and paste actions',()=>{
  const f=fixture();f.nodes['add-photo'].listeners.click();assert.equal(f.nodes['photo-menu'].hidden,false);f.nodes['choose-photo'].listeners.click();assert.equal(f.nodes['photo-input'].clicked,true);assert.equal(f.nodes['photo-menu'].hidden,true);
  f.disable();f.nodes.instruction.listeners.paste({clipboardData:{files:[{type:'image/png'}],getData:()=>''},preventDefault(){}});assert.equal(f.added.length,0);assert.match(f.errors[0],/Reconnect/);
+});
+
+test('completed image paste reanchors the input caret only in its original chat',async()=>{
+ const f=fixture();await f.nodes.instruction.listeners.paste({clipboardData:{files:[{type:'image/png'}],getData:()=>''},preventDefault(){}});assert.equal(f.repainted[0],f.nodes.instruction);
+ const switched=fixture();const pending=switched.nodes.instruction.listeners.paste({clipboardData:{files:[{type:'image/png'}],getData:()=>''},preventDefault(){}});switched.switch();await pending;assert.equal(switched.repainted.length,0);
 });

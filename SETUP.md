@@ -36,6 +36,8 @@ python3 service.py restart
 
 The phone gateway requires pairing and verifies anonymous requests are blocked before accepting a public route. Use **Desktop Companion → Phone access** to pair your browser afresh on the new Mac. The source bundle does not move login sessions or pairing access.
 
+On iPhone, you can save the paired site to the Home Screen using the browser’s Share menu. In that app, pull down from the app header to update, or pull inside a list/conversation when it is at its top. The **↻** button works from any scroll position. Use **… → This browser → Reload app** for a full interface reload; unsent drafts and photos require confirmation, and active operations block reloading. The mobile shell reserves the device’s safe area and uses solid header/composer backgrounds. Refresh has a visible spinner and completion tick; iPhone WebKit does not support standard web vibration. The app does not install a service worker or cache private conversations for offline use.
+
 For a recovery page that remains reachable independently of the Mac, follow [cloudflare_fallback/README.md](cloudflare_fallback/README.md). It is optional and uses separate per-hostname routes. It does not carry API requests or repair a blocked tunnel transport. An inspection proxy or network policy may require an approved IT exception before Cloudflare Tunnel can connect.
 
 If an existing tunnel stops working after deployment, distinguish an established connection from a new handshake. A full-system restart closes existing tunnel connections; web-only deployment should preserve them. The investigation recorded in [README.md](README.md#running-and-recovery) found TLS inspection on a failing fresh connection, but did not prove the exact outage onset or a policy change. Verify local service health, component freshness, tunnel registration, and anonymous public authentication separately before declaring recovery.
@@ -60,7 +62,7 @@ Node is needed only for JavaScript tests, not for running Companion. The allowli
 
 ## Layout
 
-- `web/`: the browser UI; clipboard attachments, prompt-first creation, appearance, component status, refresh gestures, and version updates have separate modules. Light/dark tokens and shared typography are in `theme.css`.
+- `web/`: the browser UI; clipboard attachments, prompt-first creation, appearance, component status, refresh gestures, Home Screen shell/caret behavior, and version updates have separate modules. Light/dark tokens and shared typography are in `theme.css`.
 - `companion.py`: HTTP routes and the read-only history adapter.
 - `desktop_runtime.py`, `runtime.py`, `new_chat.py`: bounded desktop/CLI integrations.
 - `access.py`, `inbox.py`, `photos.py`, `promotions.py`: Companion-owned private stores.

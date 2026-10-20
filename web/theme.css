@@ -303,3 +303,22 @@ dialog p,.panel-help {font-size:13px;line-height:1.65}
 .working-orb {flex:none;width:9px;height:9px;border-radius:50%;background:var(--positive);box-shadow:0 0 0 4px var(--positive-bg);animation:working-breathe 1.8s ease-in-out infinite}
 @keyframes working-breathe {50%{opacity:.45;transform:scale(.8)}}
 @media(prefers-reduced-motion:reduce){.working-orb {animation:none}}
+/* Keep mobile text outside blur layers and reserve the installed app's safe area. */
+html {background:var(--bg)}
+.pull-refresh {width:auto;min-width:40px;padding:8px 15px;border-radius:24px}
+.refresh-settings {margin:18px 0;padding-top:16px;border-top:1px solid var(--border)}
+.refresh-settings h3 {font-size:14px;font-weight:600;margin:0 0 8px}
+.refresh-settings p {font-size:13px;line-height:1.6;color:var(--muted)}
+#app-reload {min-height:44px;padding:10px 16px}
+@media(max-width:760px) {
+ .topbar,.composer-area {background:var(--panel);backdrop-filter:none;-webkit-backdrop-filter:none}
+ .topbar {grid-template-columns:44px minmax(0,1fr) auto;padding-top:calc(4px + env(safe-area-inset-top,0px));min-height:calc(52px + env(safe-area-inset-top,0px))}
+ #home.brand {justify-content:center;width:44px;min-height:44px;padding:0}
+ #home .brand-mark {width:36px;height:36px;font-size:12px;border-radius:12px}
+ .browse-options summary {font-size:14px;font-weight:600;min-height:44px;gap:9px;padding-inline:4px;color:var(--text)}
+ .browse-options summary::before {font-size:21px;color:var(--muted)}
+ .inbox-actions .text-button {font-size:12px;min-height:44px;padding-inline:6px}
+ .keyboard-open .conversation-heading {padding-top:calc(4px + env(safe-area-inset-top,0px))}
+ html[data-standalone=true],html[data-standalone=true] body {overscroll-behavior-y:none}
+ html[data-standalone=true] body {position:fixed;inset:0 0 auto;top:var(--viewport-top,0px);overflow:hidden}
+}
