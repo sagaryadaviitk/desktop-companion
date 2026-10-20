@@ -75,7 +75,14 @@ final class ControlModel: ObservableObject {
     private var timer: AnyCancellable?
     private var actionGeneration = 0
     private var waitingForRecovery = false
-    private var expectedSleepSetting: Bool?
+    private var expectedPowerSettings: UnattendedSettings?
+    @Published private var statusReadFailed = false
+    @Published private var statusClock = Date()
+    var statusStale: Bool { !StatusFreshness.isFresh(checkedAt: snapshot?.checked_at, failed: statusReadFailed, now: statusClock.timeIntervalSince1970) }
+    var components: [Component] { (snapshot?.components ?? []).map { item in
+        guard statusStale else { return item }
+        return Component(id: item.id, title: item.title, state: "unknown", detail: "Current status unavailable. Last recorded: " + item.detail, icon: item.icon, action: item.action, action_title: item.action_title)
+    } }
 
     init() {
         refresh()
@@ -109,6 +116,7 @@ final class ControlModel: ObservableObject {
     }
 
     func refresh() {
+        statusClock = Date()
         guard !refreshing, !busy else { return }
         refreshing = true
         let generation = actionGeneration
@@ -118,11 +126,17 @@ final class ControlModel: ObservableObject {
             guard self.actionGeneration == generation else { return }
             if let value = reply?.snapshot {
                 self.snapshot = value
-                if let expected = self.expectedSleepSetting, value.power?.closed_lid_enabled == expected,
-                   !expected || (value.power?.display_sleep_battery_minutes == 1 && value.power?.display_sleep_adapter_minutes == 1) {
-                    self.expectedSleepSetting = nil
-                    self.notice = expected ? "Unattended mode is enabled, with a one-minute display timeout. Close the lid and check the phone dashboard to verify your Mac stays reachable." : "Lid-triggered sleep is restored. The one-minute display timeout and background idle guard remain configured."
+                if self.statusReadFailed { self.notice = "Connection restored. Status is current."; self.error = false }
+                self.statusReadFailed = false
+                self.statusClock = Date()
+                if let expected = self.expectedPowerSettings, expected.matches(keepWorking: value.power?.closed_lid_enabled, battery: value.power?.display_sleep_battery_minutes, adapter: value.power?.display_sleep_adapter_minutes) {
+                    self.expectedPowerSettings = nil
+                    self.notice = "Settings verified: screen off after \(expected.batteryMinutes) min on battery and \(expected.adapterMinutes) min on power. " + (expected.keepWorking ? "Background work can continue with the lid closed." : "Normal lid-close sleep is restored.")
                     self.error = false
+                } else if self.expectedPowerSettings != nil {
+                    self.expectedPowerSettings = nil
+                    self.notice = "The requested settings could not all be verified. Check Currently applied below and apply again when ready."
+                    self.error = true
                 }
                 if self.waitingForRecovery && value.running && value.components.filter({ $0.id == "server" || $0.id == "phone" }).allSatisfy({ $0.state == "ready" }) {
                     self.waitingForRecovery = false
@@ -133,8 +147,10 @@ final class ControlModel: ObservableObject {
                     self.code = nil
                     if event.status == "used" { self.notice = "Your phone is connected."; self.error = false }
                 }
-            } else if self.snapshot == nil {
-                self.notice = "Status is unavailable. You can still use Start or Restart to repair the system."
+            } else {
+                self.statusReadFailed = true
+                self.statusClock = Date()
+                self.notice = "Current status is unavailable. Previous readings are shown as unknown; try Refresh before choosing recovery."
                 self.error = true
             }
         }
@@ -168,16 +184,14 @@ final class ControlModel: ObservableObject {
         page = "chats"
     }
 
-    func setClosedLid(_ enabled: Bool) {
-        guard !busy else { return }
+    func applyPowerSettings(_ settings: UnattendedSettings) {
+        guard !busy, let command = settings.command else { return }
         actionGeneration += 1
         busy = true
         error = false
-        notice = "Authenticate with macOS to change the system sleep setting."
+        notice = "Authenticate with macOS to apply screen timeouts and lid behavior."
         // Fixed system commands only. macOS owns the password prompt; no password is read or stored by this app.
-        let source = enabled
-            ? #"do shell script "/usr/bin/pmset -a disablesleep 1 displaysleep 1" with administrator privileges"#
-            : #"do shell script "/usr/bin/pmset -a disablesleep 0" with administrator privileges"#
+        let source = "do shell script \"" + command + "\" with administrator privileges"
         DispatchQueue.global(qos: .userInitiated).async {
             var failure: NSDictionary?
             if let script = NSAppleScript(source: source) {
@@ -187,7 +201,7 @@ final class ControlModel: ObservableObject {
             DispatchQueue.main.async {
                 self.busy = false
                 if failure == nil {
-                    self.expectedSleepSetting = enabled
+                    self.expectedPowerSettings = settings
                     self.notice = "macOS accepted the change. Checking the actual sleep setting…"
                 } else {
                     self.error = code != -128
@@ -313,11 +327,17 @@ struct ControlView: View {
     @StateObject private var model = ControlModel()
     @AppStorage("companion-appearance") private var appearance = "system"
     private var colorScheme: ColorScheme? { appearance == "dark" ? .dark : appearance == "light" ? .light : nil }
-    private var attentionCount: Int { model.snapshot?.components.filter { $0.state == "warning" || $0.state == "stopped" }.count ?? 0 }
+    @AppStorage("unattended-battery-minutes") private var batteryMinutes = UnattendedSettings.defaultBattery
+    @AppStorage("unattended-adapter-minutes") private var adapterMinutes = UnattendedSettings.defaultAdapter
+    @AppStorage("unattended-keep-working") private var keepWorking = true
+    private var selectedPowerSettings: UnattendedSettings { UnattendedSettings(keepWorking: keepWorking, batteryMinutes: batteryMinutes, adapterMinutes: adapterMinutes) }
+    private var powerSettingsApplied: Bool { !model.statusStale && selectedPowerSettings.matches(keepWorking: model.snapshot?.power?.closed_lid_enabled, battery: model.snapshot?.power?.display_sleep_battery_minutes, adapter: model.snapshot?.power?.display_sleep_adapter_minutes) }
+    private var attentionCount: Int { model.components.filter { $0.state == "warning" || $0.state == "stopped" }.count }
     private var overviewTitle: String {
-        guard let value = model.snapshot else { return "Checking your system" }
+        guard model.snapshot != nil else { return "Checking your system" }
+        if model.statusStale { return "Current status unavailable" }
         if attentionCount > 0 { return "\(attentionCount) component\(attentionCount == 1 ? "" : "s") need\(attentionCount == 1 ? "s" : "") attention" }
-        return value.components.allSatisfy { $0.state == "ready" } ? "All components are ready" : "Your available services are ready"
+        return model.components.allSatisfy { $0.state == "ready" } ? "All components are ready" : "Your available services are ready"
     }
     private var page: String { model.page }
     private let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
@@ -334,7 +354,7 @@ struct ControlView: View {
                         Button("Reload") { model.conversations.reload() }
                         Button("Restart service") { model.perform("restart_web") }.disabled(model.busy)
                     }.font(.system(size: 11)).padding(.horizontal, 22).padding(.vertical, 15).background(CompanionTheme.surface)
-                    if model.snapshot?.components.first(where: {$0.id == "server"})?.state == "stopped" {
+                    if model.components.first(where: {$0.id == "server"})?.state == "stopped" {
                         VStack(spacing: 15) {
                             Text("Start the desktop service to see your chats.").font(.system(size: 17, weight: .semibold))
                             Text("Your saved conversations remain on your Mac.").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -387,7 +407,7 @@ struct ControlView: View {
                 Text("YOUR PHONE ADDRESS").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.secondary)
                 Text(model.snapshot?.phone_url.isEmpty == false ? (model.snapshot?.phone_url ?? "") : "Not configured").font(.system(size: 11, weight: .medium)).textSelection(.enabled)
                 Rectangle().fill(CompanionTheme.line).frame(height: 1).padding(.vertical, 6)
-                HStack(spacing: 7) { Circle().fill(model.snapshot?.running == true ? Color.green.opacity(0.8) : Color.orange).frame(width: 5, height: 5); Text(model.snapshot?.running == true ? "Running in background" : "System is stopped").font(.system(size: 11)) }
+                HStack(spacing: 7) { Circle().fill(model.statusStale ? Color.secondary : model.snapshot?.running == true ? Color.green.opacity(0.8) : Color.orange).frame(width: 5, height: 5); Text(model.statusStale ? "Status unavailable" : model.snapshot?.running == true ? "Running in background" : "System is stopped").font(.system(size: 11)) }
                 Menu {
                     Picker("Appearance", selection: $appearance) {
                         Text("Match Mac").tag("system")
@@ -422,19 +442,19 @@ struct ControlView: View {
     private var overview: some View {
         VStack(alignment: .leading, spacing: 22) {
             HStack(spacing: 17) {
-                Image(systemName: model.snapshot?.running != true ? "power" : attentionCount == 0 ? "checkmark.shield" : "exclamationmark.triangle").font(.system(size: 30)).foregroundStyle(attentionCount > 0 ? CompanionTheme.warning : green)
+                Image(systemName: model.statusStale ? "questionmark.circle" : model.snapshot?.running != true ? "power" : attentionCount == 0 ? "checkmark.shield" : "exclamationmark.triangle").font(.system(size: 30)).foregroundStyle(model.statusStale ? Color.secondary : attentionCount > 0 ? CompanionTheme.warning : green)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(model.snapshot?.running == true ? overviewTitle : "Start your background system").font(.system(size: 17, weight: .semibold))
-                    Text(model.snapshot?.summary?.detail ?? "Automatic recovery stays on after you close this window.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(model.statusStale ? overviewTitle : model.snapshot?.running == true ? overviewTitle : "Start your background system").font(.system(size: 17, weight: .semibold))
+                    Text(model.statusStale ? "Live checks are unavailable. Historical values are retained; no component is reported ready until checks recover." : model.snapshot?.summary?.detail ?? "Automatic recovery stays on after you close this window.").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button(model.snapshot?.running == true ? "Restart system" : "Start system") { model.perform(model.snapshot?.running == true ? "restart" : "start") }
                     .companionControl(prominent: true).controlSize(.large).disabled(model.busy)
             }.padding(22).companionCard()
-            if let value = model.snapshot {
-                SystemMap(components: value.components) { item in componentAction(item) }
-                DisclosureGroup("Detailed components (\(value.components.count))") {
-                    LazyVGrid(columns: columns, spacing: 14) { ForEach(value.components) { item in componentCard(item) } }.padding(.top, 14)
+            if model.snapshot != nil {
+                SystemMap(components: model.components) { item in componentAction(item) }
+                DisclosureGroup("Detailed components (\(model.components.count))") {
+                    LazyVGrid(columns: columns, spacing: 14) { ForEach(model.components) { item in componentCard(item) } }.padding(.top, 14)
                 }.font(.system(size: 13, weight: .medium))
             } else {
                 ProgressView("Checking your components…").frame(maxWidth: .infinity).padding(50)
@@ -488,46 +508,65 @@ struct ControlView: View {
 
     private var unattended: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 14) {
-                powerMetric("POWER SOURCE", model.snapshot?.power?.source == "battery" ? "On battery" : model.snapshot?.power?.source == "adapter" ? "On charger" : "Checking…", icon: "battery.100")
-                powerMetric("BATTERY", model.snapshot?.power?.battery_percent.map { "\($0)%" } ?? "Unavailable", icon: "bolt")
-                powerMetric("LID", model.snapshot?.power?.lid_closed == true ? "Closed" : model.snapshot?.power?.lid_closed == false ? "Open" : "Unavailable", icon: "laptopcomputer")
-                powerMetric("PASSWORD LOCK", model.snapshot?.power?.lock_immediate == true ? "Immediate" : model.snapshot?.power?.lock_immediate == false ? "Delayed" : "Unavailable", icon: "lock")
-            }
-            VStack(alignment: .leading, spacing: 13) {
-                HStack { Text("Keep awake on battery and charger").font(.system(size: 17, weight: .semibold)); Spacer(); StatusPill(state: model.snapshot?.power?.idle_guard_active == true ? "ready" : "warning") }
-                Text("The background guard prevents idle sleep while the companion runs. Your display can turn off and your Mac can lock. No companion low-battery cutoff is configured.").font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(4)
-                Button(model.snapshot?.running == true ? "Restart guard" : "Start system") { model.perform(model.snapshot?.running == true ? "restart" : "start") }.disabled(model.busy).controlSize(.large)
+            VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("Display timeout: battery \(model.snapshot?.power?.display_sleep_battery_minutes.map { "\($0) min" } ?? "unknown") · charger \(model.snapshot?.power?.display_sleep_adapter_minutes.map { "\($0) min" } ?? "unknown")").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("Keep your Mac working").font(.system(size: 19, weight: .semibold))
                     Spacer()
-                    Button("Lock now & keep working") { model.lockNow() }.disabled(model.busy || model.snapshot?.power?.lock_immediate != true).controlSize(.large)
+                    StatusPill(state: model.statusStale ? "unknown" : model.snapshot?.power?.closed_lid_enabled == true ? "ready" : "disabled")
                 }
-            }.padding(22).companionCard()
-            VStack(alignment: .leading, spacing: 15) {
-                HStack { Text("Closed-lid mode").font(.system(size: 17, weight: .semibold)); Spacer(); Text(model.snapshot?.power?.closed_lid_enabled == true ? "ENABLED" : model.snapshot?.power?.closed_lid_enabled == false ? "OFF" : "UNAVAILABLE").font(.system(size: 10, weight: .semibold)).foregroundStyle(green) }
-                Text("Keep working with the lid shut, including on battery, and turn the display off after one minute idle on both power sources. Your immediate password requirement locks the Mac when the display turns off. macOS asks for your administrator password to apply the power settings.").font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(4)
+                Toggle("Keep working when the lid is closed", isOn: $keepWorking).font(.system(size: 14, weight: .medium)).disabled(model.busy)
+                Text(keepWorking ? "Your screen can turn off and lock while chats continue on battery or power." : "Closing the lid will use normal macOS sleep behavior. Phone access pauses while the Mac sleeps.").font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(3)
+                Divider()
+                Text("Screen off & lock").font(.system(size: 15, weight: .semibold))
+                HStack(spacing: 24) {
+                    timeoutPicker("On battery", selection: $batteryMinutes, icon: "battery.50")
+                    timeoutPicker("Plugged in", selection: $adapterMinutes, icon: "powerplug")
+                }.disabled(model.busy)
+                Text("Defaults: 5 min on battery · 10 min plugged in. These are screen timeouts, not a timer for stopping background work.").font(.system(size: 12)).foregroundStyle(.secondary)
+                Button("Use default timers") { batteryMinutes = UnattendedSettings.defaultBattery; adapterMinutes = UnattendedSettings.defaultAdapter }.font(.system(size: 12)).disabled(model.busy)
+                if model.snapshot?.power?.lock_immediate != true {
+                    Label("Immediate password lock is not confirmed. Check macOS Lock Screen settings.", systemImage: "lock.trianglebadge.exclamationmark").font(.system(size: 12)).foregroundStyle(CompanionTheme.warning)
+                }
                 HStack(spacing: 12) {
-                    Button("Enable unattended mode…") { model.setClosedLid(true) }.companionControl(prominent: true).controlSize(.large).disabled(model.busy || (model.snapshot?.power?.closed_lid_enabled == true && model.snapshot?.power?.display_sleep_battery_minutes == 1 && model.snapshot?.power?.display_sleep_adapter_minutes == 1))
-                    Button("Restore lid sleep…") { model.setClosedLid(false) }.controlSize(.large).disabled(model.busy || model.snapshot?.power?.closed_lid_enabled == false)
+                    Button(powerSettingsApplied ? "Settings applied" : "Apply settings…") { model.applyPowerSettings(selectedPowerSettings) }.companionControl(prominent: true).controlSize(.large).disabled(model.busy || powerSettingsApplied || selectedPowerSettings.command == nil)
+                    Button("Lock screen now") { model.lockNow() }.controlSize(.large).disabled(model.busy || model.statusStale || model.snapshot?.power?.lock_immediate != true)
                 }
-                Text("This is a system-wide setting. It also blocks manual sleep and stays enabled after quitting this app or stopping the companion. Restore lid sleep here when you want normal lid-close behavior.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
+                Text("macOS asks for administrator authentication. Lid behavior is system-wide and remains set after Companion closes; switch it off here to restore normal lid sleep. No low-battery cutoff is configured.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
+                if let power = model.snapshot?.power {
+                    Text("\(model.statusStale ? "Last known" : "Currently applied"): battery \(power.display_sleep_battery_minutes.map { "\($0) min" } ?? "unknown") · plugged in \(power.display_sleep_adapter_minutes.map { "\($0) min" } ?? "unknown")").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
             }.padding(22).companionCard()
-            VStack(alignment: .leading, spacing: 10) {
-                HStack { Text("Desktop apps while locked").font(.system(size: 17, weight: .semibold)); Spacer(); Text(model.snapshot?.computer_use?.update_available == true ? "UPDATE AVAILABLE" : model.snapshot?.computer_use?.stale == true ? "PREVIOUS TEST" : model.snapshot?.computer_use?.state == "passed" ? "LAST TEST PASSED" : "CHECK REQUIRED").font(.system(size: 10, weight: .semibold)).foregroundStyle(model.snapshot?.computer_use?.state == "passed" && model.snapshot?.computer_use?.stale != true ? green : CompanionTheme.warning) }
-                Text("Keeping your Mac awake does not by itself enable native desktop app access while locked. ChatGPT Locked Use also needs its current authorization component and an active, trusted Computer Use turn.").font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(4)
-                Text("Installed: \(model.snapshot?.computer_use?.installed_version ?? "Not detected") · Available: \(model.snapshot?.computer_use?.available_version ?? "Unavailable")").font(.system(size: 11)).foregroundStyle(.secondary)
-                if model.snapshot?.computer_use?.state == "blocked" { Text("Last native Chrome test: automatic unlock did not complete. Background work and direct message delivery continued.").font(.system(size: 12)).foregroundStyle(.orange) }
-                if model.snapshot?.computer_use?.state == "passed" { Text("Last test: native Chrome access succeeded after your lock confirmation. Local keyboard or pointer input can pause automatic unlock until you unlock manually.").font(.system(size: 12)).foregroundStyle(.secondary) }
-                if let checked = model.snapshot?.computer_use?.checked_at { Text("Tested \(Date(timeIntervalSince1970: checked).formatted(date: .abbreviated, time: .shortened))\(model.snapshot?.computer_use?.stale == true ? " · Previous check" : "")").font(.system(size: 11)).foregroundStyle(.secondary) }
-                Button("Update Locked Use…") { model.perform("update_locked_use") }.companionControl(prominent: true).controlSize(.large).disabled(model.busy || model.snapshot?.computer_use?.update_available != true)
-                Text("Uses OpenAI’s signed installer and the macOS-owned administrator prompt. After updating, verify native Chrome from your phone with the lid closed; installation alone is not a successful access test.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Ready for unattended work?").font(.system(size: 16, weight: .semibold))
+                readinessRow("Background work", ready: model.snapshot?.power?.idle_guard_active == true, detail: "Companion keeps the Mac awake while it runs.")
+                readinessRow("Phone connection", ready: model.components.first(where: {$0.id == "phone"})?.state == "ready", detail: "Checks the route from your phone to this Mac.")
+                Button("View system status") { model.page = "overview" }.controlSize(.large)
             }.padding(22).companionCard()
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Verify the complete connection").font(.system(size: 14, weight: .semibold))
-                Text("After enabling closed-lid mode, close your Mac for a minute and open your configured phone address over mobile data. The header should keep updating with your Mac’s battery and lid state.").font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(4)
-                Text("Leave the running Mac on a hard, ventilated surface. Wi-Fi must remain available; a depleted battery, shutdown, or loss of internet ends the connection.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
-            }.padding(20).background(green.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+            DisclosureGroup("Use desktop apps while locked") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("ChatGPT Locked Use is separate from keeping the Mac awake. It needs an enabled, current authorization component and a trusted Computer Use turn. macOS can still require a manual unlock.").font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(3)
+                    Text("Installed: \(model.snapshot?.computer_use?.installed_version ?? "Not detected") · Available: \(model.snapshot?.computer_use?.available_version ?? "Unavailable")").font(.system(size: 11)).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Open ChatGPT") { NSWorkspace.shared.open(URL(fileURLWithPath: desktopAppPath)) }.controlSize(.large)
+                        Button("Update Locked Use…") { model.perform("update_locked_use") }.controlSize(.large).disabled(model.busy || model.snapshot?.computer_use?.update_available != true)
+                    }
+                }.padding(.top, 12)
+            }.font(.system(size: 14, weight: .medium)).padding(22).companionCard()
+        }
+    }
+
+    private func timeoutPicker(_ title: String, selection: Binding<Int>, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: icon).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+            Picker(title, selection: selection) { ForEach(UnattendedSettings.timeouts, id: \.self) { Text("\($0) minutes").tag($0) } }.labelsHidden().frame(maxWidth: .infinity)
+        }
+    }
+
+    private func readinessRow(_ title: String, ready: Bool, detail: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: model.statusStale ? "questionmark.circle" : ready ? "checkmark.circle.fill" : "exclamationmark.circle").foregroundStyle(model.statusStale ? Color.secondary : ready ? green : CompanionTheme.warning)
+            VStack(alignment: .leading, spacing: 3) { Text(title).font(.system(size: 13, weight: .medium)); Text(model.statusStale ? "Current check unavailable" : detail).font(.system(size: 11)).foregroundStyle(.secondary) }
+            Spacer()
         }
     }
 

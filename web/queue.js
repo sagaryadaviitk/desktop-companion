@@ -34,7 +34,7 @@ window.CompanionQueue={install({request,steer,refresh,onResult,isConnected,getCh
     const button=make('button',label,'quiet-button queue-action');button.type='button';button.dataset.action=action;button.setAttribute('aria-label',`${label} queued message`);button.disabled=!isConnected()||!enabled||busy.has(item.id);button.title=enabled?label:'This action needs the connected desktop or supported message content.';
     button.addEventListener('click',async()=>{if(button.disabled)return;if(action!=='steer'){open(item,data,action);return;}button.disabled=true;button.textContent='Steering…';busy.add(item.id);try{await steer(item,data);}catch(e){onResult(e.message);}finally{busy.delete(item.id);await refresh();}});actions.append(button);
    }
-   row.append(actions);content.append(row);
+   if(item.controls_reason)row.append(make('p',item.controls_reason,'panel-help'));row.append(actions);content.append(row);
   }
   details.append(content);return details;
  }

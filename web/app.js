@@ -13,7 +13,7 @@ const readRequests=new Set();
 let displayedRevision=null,readFrame=0,refreshPromise=null,chatRequestVersion=0;
 let catalogRevision='',conversationRevision='',chatRefreshPromise=null;
 const deliveryReceipts=CompanionConversation.receipts();
-let conversationScroll=null,approvalUI=null;
+let conversationScroll=null,approvalUI=null,photoStorageBusy=false;
 const loadedBuild=document.querySelector('meta[name=companion-build]').content;
 let updater=null;
 function hasUnsentDraft(){return Boolean(approvalUI?.hasDraft())||Boolean(newChatFlow?.hasDraft())||[...drafts.values()].some(value=>value.trim())||[...photoDrafts.values()].some(value=>value.length)||[...questionDrafts.values()].some(value=>typeof value==='string'?value.trim():value?.answer||value?.text);}
@@ -56,10 +56,10 @@ function lockScreen(){
   displayedRevision=null;readRequests.clear();refreshPromise=null;cancelAnimationFrame(readFrame);el('pull-refresh').hidden=true;
   catalogRevision='';conversationRevision='';
   photoDrafts.clear();photoUploads.clear();queueSteering.clear();clearTimeout(resultTimer);renderPhotoDrafts();questionDrafts.clear();questionBusy.clear();questionErrors.clear();questionSignature='';el('questions-banner').hidden=true;el('question-cards').replaceChildren();
-  for(const id of ['usage-dialog','model-dialog','phone-dialog','questions-dialog','host-dialog','new-chat-dialog','account-dialog','chat-actions-dialog','system-dialog'])if(el(id).open)el(id).close();
+  for(const id of ['usage-dialog','model-dialog','phone-dialog','photo-storage-dialog','questions-dialog','host-dialog','new-chat-dialog','account-dialog','chat-actions-dialog','system-dialog'])if(el(id).open)el(id).close();
   newChatFlow?.reset();el('new-chat').disabled=true;
   healthFlow?.reset();
-  queueUI?.reset();approvalUI?.reset();
+  queueUI?.reset();approvalUI?.reset();el('photo-storage-drafts').replaceChildren();el('photo-storage-status').textContent='';
   chats=[];projects=[];selected=null;selectedData=null;csrf="";lastSignature="";panelSignature="";projectSignature="";initialSelectionPending=true;messageMap.clear();nextBefore=null;loadedEarlier=false;
   el("chats").replaceChildren();el("messages").replaceChildren();el("pending").replaceChildren();el("instruction").value="";
   drafts.clear();
@@ -91,7 +91,7 @@ function updateComposer(){
   el("send").disabled=!available||!connected||sending||uploading>0||!input.value.trim()&&!photoCount||deliveryMode==='steer'&&!canSteer&&!retrying;
   const label=retrying?'Check previous send':deliveryMode==='steer'?'Steer active turn':deliveryMode==='send'?'Send message':'Queue follow-up';
   el("send").setAttribute("aria-label",sending?'Sending…':label);el('send').querySelector('.send-label').textContent=label;
-  el('mode-steer').disabled=!canSteer||!connected||sending;el('mode-steer').title=canSteer?'Send to the active turn':live.reason||'Live steering needs a shared desktop connection.';
+  el('mode-steer').disabled=!canSteer||!connected||sending;el('mode-steer').title=canSteer?'Send to the active turn':live.steer_reason||live.reason||'Live steering needs a shared desktop connection.';
   el('mode-queue').disabled=sending;
   el('mode-queue').textContent=canSend?'Send':'Queue';
   for(const mode of ['queue','steer'])el('mode-'+mode).setAttribute('aria-pressed',String(mode==='queue'?deliveryMode!=='steer':deliveryMode==='steer'));
@@ -124,14 +124,14 @@ function mainChats(){return chats.filter(chat=>!chat.archived&&!chat.subagent);}
 function renderHome(){
   const main=mainChats(),unread=main.filter(chat=>chat.unread),working=main.filter(chat=>executionStatus(chat)==='working');
   el('unread-count').textContent=unread.length;
-  el('reply-count').textContent=main.filter(chat=>chat.question_count>0||approvalCount(chat)>0).length;
+  el('reply-count').textContent=main.filter(chat=>questionCount(chat)>0||approvalCount(chat)>0).length;
   for(const view of ['recent','unread','working','reply'])el('quick-'+view).setAttribute('aria-pressed',String(inboxView===view));
   const project=el('project-filter').selectedOptions[0]?.textContent||'All projects',filter=el('chat-filter').selectedOptions[0]?.textContent||'Main chats';
   el('filter-summary').textContent=project.replace(' & folders','')+' · '+filter;
   el('mark-all-read').disabled=markingAll||!connected||!visibleChats().some(chat=>chat.unread);
   el('mark-all-read').textContent=markingAll?'Marking…':'Mark seen';
   const visible=visibleChats();
-  const signature=JSON.stringify([visible.map(chat=>[chat.id,chat.title,chat.preview,chat.preview_role,chat.last_activity_at,chat.updated_at,chat.unread,chat.question_count,approvalCount(chat),chat.project_keys,executionStatus(chat)]),statsKey(main),projects.map(p=>[p.id,p.name,p.chat_count]),inboxView,el('project-filter').value,el('chat-filter').value,el('search').value]);
+  const signature=JSON.stringify([visible.map(chat=>[chat.id,chat.title,chat.preview,chat.preview_role,chat.last_activity_at,chat.updated_at,chat.unread,questionCount(chat),approvalCount(chat),chat.project_keys,executionStatus(chat)]),statsKey(main),projects.map(p=>[p.id,p.name,p.chat_count]),inboxView,el('project-filter').value,el('chat-filter').value,el('search').value]);
   if(signature===homeSignature)return;homeSignature=signature;
   const stats=[[String(unread.length),'Unread updates'],[String(working.length),'Working now'],[String(projects.filter(p=>p.kind==='project').length),'Projects']];
   el('inbox-overview').replaceChildren();el('home-stats').replaceChildren();
@@ -163,7 +163,7 @@ function chatCard(chat,home=false){
   if(chat.archived||chat.subagent){const kind=document.createElement('span');kind.textContent=chat.archived?'Archived':'Subagent';tags.append(kind);}
   if(chat.unread){const newTag=document.createElement('span');newTag.className='new-tag';newTag.textContent='Unread';tags.append(newTag);}
   if(approvalCount(chat)){const approval=document.createElement('span');approval.className='approval-tag';approval.textContent=`${approvalCount(chat)} live request${approvalCount(chat)===1?'':'s'}`;tags.prepend(approval);}
-  if(chat.question_count){const reply=document.createElement('span');reply.className='reply-tag';reply.textContent=`${chat.question_count} question${chat.question_count===1?'':'s'}`;tags.prepend(reply);}
+  if(questionCount(chat)){const reply=document.createElement('span');reply.className='reply-tag';reply.textContent=`${questionCount(chat)} question${questionCount(chat)===1?'':'s'}`;tags.prepend(reply);}
   button.append(headingRow,preview,meta,tags);button.addEventListener('click',()=>selectChat(chat.id));return button;
 }
 
@@ -271,8 +271,34 @@ else el('add-photo').addEventListener('click',()=>el('photo-input').click());
 approvalUI=CompanionApprovals.create({dialog:el('approvals-dialog'),banner:el('approvals-banner'),panel:el('approval-cards'),close:el('approvals-close'),summary:el('approvals-summary'),
   submit:payload=>api('/api/approvals/respond',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify(payload)}),
   changed:result=>{if(result)showCommandResult(result.message,true);refreshChat(true);}});
+function questionCount(chat){const value=connected?currentStatus?.execution?.[chat.id]?.question_count:null;return Number.isInteger(value)?value:chat.question_count||0;}
 function approvalCount(chat){return connected?currentStatus?.execution?.[chat.id]?.approval_count||0:0;}
 function renderApprovals(){approvalUI.update({thread:selected,visible:Boolean(selected&&!document.body.classList.contains('home-open')),connected:Boolean(connected&&selectedData?.control?.live?.connected&&!selectedData?.archived),requests:selectedData?.control?.live?.execution?.approvals||[]});}
+async function renderPhotoStorage(){
+ const version=authVersion,panel=el('photo-storage-drafts');
+ try{
+  const data=await api('/api/photos/storage');if(version!==authVersion)return;
+  const mb=n=>(n/1048576).toFixed(1)+' MB';
+  el('photo-storage-status').textContent=`${mb(data.used_bytes)} of ${mb(data.capacity_bytes)} used · ${mb(data.protected_bytes)} kept for submitted messages`;
+  panel.replaceChildren();
+  if(!data.drafts.length){const p=document.createElement('p');p.textContent='No unsent photos in this browser. Submitted attachments are protected and cannot be purged here.';p.className='panel-help';panel.append(p);}
+  for(const photo of data.drafts){
+   const row=document.createElement('div');row.className='photo-storage-row';
+   const img=document.createElement('img');img.src=photo.url;img.alt=photo.name;img.loading='lazy';
+   const text=document.createElement('span');text.textContent=photo.name+' · '+shortTime(photo.created_at*1000);
+   const remove=document.createElement('button');remove.type='button';remove.className='quiet-button';remove.textContent='Remove';
+   remove.addEventListener('click',async()=>{
+    if(photoStorageBusy)return;photoStorageBusy=true;remove.disabled=true;
+    try{await api('/api/photos/drafts/remove',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({photo_id:photo.id})});if(version!==authVersion)return;
+     for(const [id,photos]of photoDrafts)photoDrafts.set(id,photos.filter(p=>p.id!==photo.id));updateComposer();await renderPhotoStorage();
+    }catch(error){if(version===authVersion)el('photo-storage-status').textContent=error.message;}
+    finally{photoStorageBusy=false;remove.disabled=false;}
+   });row.append(img,text,remove);panel.append(row);
+  }
+ }catch(error){if(version===authVersion)el('photo-storage-status').textContent=error.message;}
+}
+el('photo-storage-open').addEventListener('click',()=>{el('account-dialog').close();el('photo-storage-dialog').showModal();renderPhotoStorage();});
+el('photo-storage-close').addEventListener('click',()=>el('photo-storage-dialog').close());
 function renderQuestions(){
   renderApprovals();
   const questions=selectedData?.questions||[],banner=el('questions-banner');
@@ -307,7 +333,7 @@ function renderQuestions(){
     if(question.options.length)form.append(options);
     const label=note('label',question.options.length?'Your answer':'Reply');label.htmlFor=textarea.id;
     const submit=note('button',busy?'Sending…':submitted?'Reply submitted':'Send reply','primary-button');submit.type='submit';
-    const feedback=note('p',questionErrors.get(key)||(question.delivery==='queued'?'Reply queued. Use Steer reply now to deliver it to the active turn.':question.delivery==='unknown'?'Delivery is unconfirmed. Check the desktop queue and conversation before trying again.':question.delivery==='steered'||question.delivery==='sent'?'Reply delivered to the desktop chat.':submitted?'A reply was already attempted. Check the conversation on your Mac.':!available?'Replies are unavailable until this chat reconnects. Your draft is kept.':''),'question-feedback');feedback.setAttribute('role','status');
+    const feedback=note('p',questionErrors.get(key)||(question.delivery==='queued'?(selectedData.control.live?.queue_steer?'Reply queued. Use Steer reply now to deliver it to the active turn.':'Reply queued until this turn finishes. Manage this queued reply on your Mac.'):question.delivery==='unknown'?'Delivery is unconfirmed. Check the desktop queue and conversation before trying again.':question.delivery==='steered'||question.delivery==='sent'?'Reply delivered to the desktop chat.':submitted?'A reply was already attempted. Check the conversation on your Mac.':!available?'Replies are unavailable until this chat reconnects. Your draft is kept.':''),'question-feedback');feedback.setAttribute('role','status');
     function update(){submit.disabled=!available||submitted||busy||!textarea.value.trim();}
     textarea.addEventListener('input',()=>{questionDrafts.set(key,textarea.value);for(const radio of options.querySelectorAll('input'))radio.checked=radio.value===textarea.value;update();});
     form.addEventListener('submit',async event=>{
@@ -321,7 +347,7 @@ function renderQuestions(){
       finally{questionBusy.delete(key);if(version===authVersion&&selected===target){await refreshChat();renderQuestions();}}
     });
     form.append(label,textarea,submit,feedback);
-    if(question.delivery==='queued'&&question.queued_message){const instruction=question.queued_message,steer=note('button',queueSteering.has(instruction.id)?'Steering…':'Steer reply now','quiet-button');steer.type='button';steer.disabled=!available||!selectedData.control.live?.queue_steer||!instruction.can_steer||queueSteering.has(instruction.id);steer.addEventListener('click',async()=>{steer.disabled=true;steer.textContent='Steering…';try{await steerQueued(instruction,selectedData);}catch(error){questionErrors.set(key,error.message);renderQuestions();}});form.append(steer);}
+    if(question.delivery==='queued'&&question.queued_message&&selectedData.control.live?.queue_steer){const instruction=question.queued_message,steer=note('button',queueSteering.has(instruction.id)?'Steering…':'Steer reply now','quiet-button');steer.type='button';steer.disabled=!available||!instruction.can_steer||queueSteering.has(instruction.id);steer.addEventListener('click',async()=>{steer.disabled=true;steer.textContent='Steering…';try{await steerQueued(instruction,selectedData);}catch(error){questionErrors.set(key,error.message);renderQuestions();}});form.append(steer);}
     card.append(form);panel.append(card);update();
   }
   el('questions-dialog').scrollTop=position;
@@ -357,7 +383,7 @@ fitViewport();
 function visibleChats(){
   const query = el("search").value.trim().toLowerCase();
   const project=el("project-filter").value,filter=el("chat-filter").value;
-  return chats.filter(chat=> (inboxView!=='unread'||chat.unread)&&(inboxView!=='reply'||chat.question_count>0||approvalCount(chat)>0)&&(!project||(chat.project_keys||[chat.project_key]).includes(project))&&`${chat.title} ${chat.workspace} ${projectLabel(chat).name} ${chat.preview||''} ${chat.id}`.toLowerCase().includes(query)&&
+  return chats.filter(chat=> (inboxView!=='unread'||chat.unread)&&(inboxView!=='reply'||questionCount(chat)>0||approvalCount(chat)>0)&&(!project||(chat.project_keys||[chat.project_key]).includes(project))&&`${chat.title} ${chat.workspace} ${projectLabel(chat).name} ${chat.preview||''} ${chat.id}`.toLowerCase().includes(query)&&
     (filter==="all"||filter==="active"&&!chat.archived&&!chat.subagent||filter==="archived"&&chat.archived||filter==="pinned"&&chat.pinned||filter==="subagents"&&chat.subagent||filter==="working"&&!chat.archived&&executionStatus(chat)==="working"));
 }
 
@@ -384,7 +410,7 @@ function renderChats() {
   renderHome();
   el("chat-count").textContent = `${visible.length}`;
   el("workspace-summary").textContent=`${projects.filter(project=>project.kind==="project").length} projects · ${chats.length} chats · ${chats.filter(chat=>chat.archived).length} archived`;
-  const signature=JSON.stringify([visible,visible.map(executionStatus),visible.map(approvalCount),selected,inboxView,el('project-filter').value,projects.map(p=>[p.id,p.name]),document.body.classList.contains('home-open')]);if(signature===chatSignature)return;chatSignature=signature;
+  const signature=JSON.stringify([visible,visible.map(executionStatus),visible.map(approvalCount),visible.map(questionCount),selected,inboxView,el('project-filter').value,projects.map(p=>[p.id,p.name]),document.body.classList.contains('home-open')]);if(signature===chatSignature)return;chatSignature=signature;
   const panel=el("chats"),oldTop=panel.scrollTop,focused=document.activeElement?.dataset.chat;
   panel.replaceChildren();
   // The catalog already uses the desktop's saved recency order. Badges never change it.
@@ -770,7 +796,7 @@ el("composer").addEventListener("submit",async event=>{
   finally{sending=false;if(version===authVersion){renderMessages();updateComposer();await refreshChat(true);}}
 });
 el('connect-chat').addEventListener('click',async()=>{if(connectingChat||!selected)return;const target=selected;connectingChat=true;updateComposer();try{const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});if(target===selected){showCommandResult(result.message,true);await refreshChat();}}catch(error){if(target===selected)showCommandResult(error.message);}finally{connectingChat=false;updateComposer();}});
-if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>approvalUI?.busy()||sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else if(document.body.classList.contains('home-open')||!selected)showNotice(message);else showCommandResult(message);}});
+if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>photoStorageBusy||approvalUI?.busy()||sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else if(document.body.classList.contains('home-open')||!selected)showNotice(message);else showCommandResult(message);}});
 el('app-reload').addEventListener('click',()=>updater?.reload());
 window.addEventListener('pageshow',event=>{if(event.persisted&&!document.body.classList.contains('signed-out'))refreshAll(true);});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&!document.body.classList.contains("signed-out")){scheduleMarkViewed();if(document.body.classList.contains("booting"))initialize();else refreshAll();}});

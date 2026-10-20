@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 import zlib
+import time
 
 from companion import CompanionServer,CommandJournal
 from photos import PhotoStore,PhotoError,image_size
@@ -28,6 +29,44 @@ class PhotoStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.store=PhotoStore(Path(self.temp.name)/'photos')
     def tearDown(self):self.temp.cleanup()
+
+    def test_abandoned_week_old_drafts_do_not_permanently_exhaust_owner_quota(self):
+        photo=self.store.upload('chat','phone',photo_data());data=self.store.read(photo['id'],'phone')
+        old=time.time()-self.store.DRAFT_SECONDS-1
+        with sqlite3.connect(self.store.db) as db:
+            db.execute('DELETE FROM photos')
+            for i in range(21):
+                identity=f'{i:032x}';(self.store.root/(identity+'.jpg')).write_bytes(data)
+                db.execute('INSERT INTO photos (id,thread_id,owner,name,created,submitted) VALUES (?,?,?,?,?,?)',(identity,'chat','phone','Old photo',old,1 if i==20 else 0))
+        new=self.store.upload('chat','phone',photo_data())
+        self.assertEqual(len(self.store.storage('phone')['drafts']),1)
+        self.assertTrue((self.store.root/(f'{20:032x}'+'.jpg')).exists())
+        self.assertTrue(self.store.read(new['id'],'phone'))
+
+    def test_storage_recovers_recent_draft_references_but_never_deletes_submitted_or_other_owner(self):
+        draft=self.store.upload('draft:temporary','phone',photo_data(),'Draft')
+        protected=self.store.upload('chat','phone',photo_data(),'Unconfirmed')
+        self.store.submit([protected['id']])
+        other=self.store.upload('chat','other-phone',photo_data(),'Other browser')
+        storage=self.store.storage('phone');self.assertEqual([p['id'] for p in storage['drafts']],[draft['id']]);self.assertGreater(storage['protected_bytes'],0)
+        self.store.remove_draft(other['id'],'phone');self.assertTrue(self.store.read(other['id'],'other-phone'))
+        self.store.remove_draft(protected['id'],'phone');self.assertTrue(self.store.read(protected['id'],'phone'))
+        self.store.remove_draft(draft['id'],'phone');self.assertEqual(self.store.storage('phone')['drafts'],[])
+
+    def test_submission_rechecks_draft_existence_after_concurrent_remove(self):
+        photo=self.store.upload('chat','phone',photo_data())
+        self.store.resolve([photo['id']],'chat','phone')
+        self.store.remove_draft(photo['id'],'phone')
+        with self.assertRaises(PhotoError):self.store.submit([photo['id']])
+
+    def test_expiry_and_capacity_never_reclaim_submitted_or_uncertain_photos(self):
+        photo=self.store.upload('chat','phone',photo_data());self.store.submit([photo['id']])
+        with sqlite3.connect(self.store.db) as db:db.execute('UPDATE photos SET created=0')
+        self.store.expire_drafts(now=time.time()+self.store.DRAFT_SECONDS)
+        self.assertTrue(self.store.read(photo['id'],'phone'))
+        self.store.STORAGE_BYTES=1
+        with self.assertRaisesRegex(PhotoError,'protected'):self.store.upload('chat','phone',photo_data())
+        self.assertTrue(self.store.read(photo['id'],'phone'))
 
     def test_real_decoder_creates_private_canonical_photo_and_binds_draft_to_owner_and_chat(self):
         photo=self.store.upload('chat-1','phone-1',photo_data(),'../../Camera.png')

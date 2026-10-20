@@ -34,3 +34,13 @@ test('reopening follows the latest message through delayed image/layout growth w
  s.open();events.wheel({deltaY:-10});flush();assert.equal(panel.scrollTop,200);
  s.open();flush();assert.equal(panel.scrollTop,1800);
 });
+
+test('accepted receipts in another chat retain exact identity without indefinitely blocking app reload',()=>{
+ const receipts=ui.receipts();receipts.begin('A','request-A','Message');assert.equal(receipts.hasPending(),true);
+ receipts.settle('A','request-A',{state:'sent',client_id:'client-A'});receipts.list('B',[]);
+ assert.equal(receipts.hasPending(),false);assert.equal(receipts.list('A',[]).length,1);
+ receipts.begin('B','request-B','Another message');assert.equal(receipts.hasPending(),true);
+ receipts.settle('B','request-B',{state:'steered',client_id:'client-B'});assert.equal(receipts.hasPending(),false);
+ receipts.list('A',[{role:'user',client_id:'different',text:'Message'}]);assert.equal(receipts.list('A').length,1);
+ receipts.list('A',[{role:'user',client_id:'client-A'}]);assert.equal(receipts.list('A').length,0);
+});

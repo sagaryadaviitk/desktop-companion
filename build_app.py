@@ -76,7 +76,7 @@ def main():
     resources = contents/"Resources"
     resources.mkdir()
     module_cache = ROOT/".state"/"swift-cache"
-    subprocess.run(["/usr/bin/xcrun","swiftc","-O","-swift-version","5","-parse-as-library","-module-cache-path",str(module_cache),str(ROOT/"native"/"CompanionApp.swift"),str(ROOT/'native'/'Appearance.swift'),str(ROOT/'native'/'SystemMap.swift'),"-o",str(executable)],check=True)
+    subprocess.run(["/usr/bin/xcrun","swiftc","-O","-swift-version","5","-parse-as-library","-module-cache-path",str(module_cache),str(ROOT/"native"/"CompanionApp.swift"),str(ROOT/'native'/'Appearance.swift'),str(ROOT/'native'/'SystemMap.swift'),str(ROOT/'native'/'ControlPolicies.swift'),"-o",str(executable)],check=True)
     executable.chmod(0o755)
     iconset = ROOT/".state"/"native-build"/"AppIcon.iconset"
     subprocess.run(["/usr/bin/xcrun","swift","-module-cache-path",str(module_cache),str(ROOT/"native"/"Icon.swift"),str(iconset)],check=True)

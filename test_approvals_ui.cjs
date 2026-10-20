@@ -44,3 +44,11 @@ test('disconnect disables responses and changing chat invalidates old handlers w
 test('a desktop-only verification request is visible without fake approval controls',()=>{
  const f=fixture();f.update([{...f.request,kind:'desktop',title:'Verify on your Mac',choices:[]}]);assert.ok(walk(f.panel).find(n=>n.textContent==='Requires your Mac'));assert.equal(walk(f.panel).filter(n=>n.tag==='button').length,0);
 });
+
+test('live question counts override stale catalog questions in the To reply filter',()=>{
+ const app=fs.readFileSync(__dirname+'/web/app.js','utf8'),source=app.slice(app.indexOf('function questionCount(chat)'),app.indexOf('function approvalCount(chat)'));
+ const ctx={connected:true,currentStatus:{execution:{chat:{question_count:0}}}};vm.runInNewContext(source,ctx);
+ assert.equal(ctx.questionCount({id:'chat',question_count:13}),0);
+ ctx.currentStatus.execution.chat.question_count=2;assert.equal(ctx.questionCount({id:'chat',question_count:13}),2);
+ assert.equal(ctx.questionCount({id:'unloaded',question_count:1}),1);
+});

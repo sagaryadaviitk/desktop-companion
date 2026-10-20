@@ -45,19 +45,16 @@ class QueueProtocolTests(unittest.TestCase):
         self.queued['input'][1]['url']='https://external.example/image'
         with self.assertRaises(RuntimeUnavailable):queue_photo_message(CHAT,'Original',[str(self.photo)],'/test/codex',self.client)
 
-    def test_edit_keeps_exact_queue_identity_order_and_photo_in_place(self):
-        result=change_queued_message(CHAT,self.item,'Edited',executable='/test/codex',client_factory=self.client)
-        self.assertEqual(result['state'],'updated');self.assertEqual([m for m,_ in self.calls],['thread/queue/list','thread/queue/update'])
-        params=self.calls[-1][1];self.assertEqual(params['queuedSubmissionId'],'queue-1');self.assertEqual(params['input'][1],self.queued['input'][1])
-        self.calls.clear();self.queued['clientUserMessageId']='another-client'
-        with self.assertRaises(QueueNotClaimed):change_queued_message(CHAT,self.item,'New',executable='/test/codex',client_factory=self.client)
-        self.assertEqual(len(self.calls),1)
 
-    def test_delete_checks_current_content_before_removing(self):
-        self.assertEqual(change_queued_message(CHAT,self.item,executable='/test/codex',client_factory=self.client)['state'],'deleted')
-        self.calls.clear();self.queued['input'][0]['text']='Edited on Mac'
-        with self.assertRaises(QueueNotClaimed):change_queued_message(CHAT,self.item,executable='/test/codex',client_factory=self.client)
-        self.assertEqual(len(self.calls),1)
+
+    def test_unguarded_queue_mutations_reject_before_read_write_or_process_creation(self):
+        # This fake would return old text from list and edit it before delete/update.
+        # Without a native content precondition even a second list cannot fix it.
+        original=self.queued.copy()
+        for message in ['Edited',None]:
+            with self.assertRaisesRegex(QueueNotClaimed,'concurrent edit'):
+                change_queued_message(CHAT,self.item,message,executable='/test/codex',client_factory=self.client)
+            self.assertEqual(self.calls,[]);self.assertEqual(self.queued,original)
 
 
 class QueueRouteTests(unittest.TestCase):

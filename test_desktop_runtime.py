@@ -31,23 +31,8 @@ class QueueClaimTests(unittest.TestCase):
 
     def claim(self):return claim_queued_message('chat-1',self.item,self.client,'/test/codex')
 
-    def test_claim_only_uses_queue_apis_and_verifies_original_identity(self):
-        self.assertEqual(self.claim()['message']['context']['prompt'],'Exact original')
-        self.assertEqual(self.command,['/test/codex','app-server','--stdio'])
-        self.assertEqual([method for method,_ in self.calls],['thread/queue/list','thread/queue/delete'])
-        self.assertEqual(self.calls[-1][1],{'threadId':'chat-1','queuedSubmissionId':'queue-1'})
 
-    def test_edited_or_different_submission_is_never_deleted(self):
-        for key,value in [('clientUserMessageId','other-client'),('input',[{'type':'text','text':'Edited'}]),('input',[{'type':'image','url':'file:///private'}])]:
-            original=self.queued.copy();self.queued[key]=value;self.calls=[]
-            with self.assertRaises(RuntimeUnavailable):self.claim()
-            self.assertEqual(len(self.calls),1);self.queued=original
 
-    def test_missing_or_already_claimed_message_stops_promotion(self):
-        self.queued['id']='other-queue'
-        with self.assertRaises(RuntimeUnavailable):self.claim()
-        self.queued['id']='queue-1';self.deleted=False
-        with self.assertRaises(RuntimeUnavailable):self.claim()
 
     def test_photo_queue_uses_only_add_and_verifies_exact_client_and_content(self):
         calls=[]
@@ -62,22 +47,7 @@ class QueueClaimTests(unittest.TestCase):
         self.assertEqual(result['state'],'queued');self.assertEqual(len(calls),1);self.assertEqual(calls[0][0],'thread/queue/add')
         self.assertEqual(calls[0][1]['input'][-1],{'type':'localImage','path':'/private/photo.jpg'})
 
-    def test_queue_claim_preserves_approved_photo_paths(self):
-        self.item['photos']=['/private/approved-photo.jpg']
-        self.queued['input'].append({'type':'localImage','path':'/private/approved-photo.jpg'})
-        self.assertEqual(self.claim()['message']['context']['prompt'],'Exact original')
-        self.calls=[];self.queued['input'][-1]['path']='/private/another-photo.jpg'
-        with self.assertRaises(RuntimeUnavailable):self.claim()
-        self.assertEqual(len(self.calls),1)
 
-    def test_native_queue_api_url_field_matches_storage_image_url_without_fetching(self):
-        url='data:image/jpeg;base64,EXACT_OWNED_PHOTO'
-        self.item.update(photos=['/private/photo.jpg'],image_urls=[url],source_photos=[('image',url)])
-        self.queued['input'].append({'type':'image','url':url,'detail':None})
-        self.assertEqual(self.claim()['message']['context']['prompt'],'Exact original')
-        self.calls=[];self.queued['input'][-1]['url']='https://other.example/photo'
-        with self.assertRaises(QueueNotClaimed):self.claim()
-        self.assertEqual(len(self.calls),1)
 
 
 class DesktopRuntimeTests(unittest.TestCase):
@@ -92,6 +62,16 @@ class DesktopRuntimeTests(unittest.TestCase):
         self.thread={'id':'chat-1','archived':False,'last_recorded_turn':{'turn_id':'turn-1','status':'inProgress'},'details':{'folder':'/demo/project'}}
         self.worker=threading.Thread(target=self.serve,daemon=True);self.worker.start()
         self.runtime=DesktopRuntime(self.home,lambda _:self.thread)
+        self.atomic_calls=[]
+        outer=self
+        class Atomic:
+            def present(self):return True
+            def capabilities(self,_):return {'steer':True}
+            def steer(self,*args,**kwargs):
+                outer.atomic_calls.append((*args,kwargs))
+                if outer.wrong_turn:raise RuntimeUnavailable('Expected turn changed')
+                return {'state':'steered','client_id':kwargs['client_id'],'turn_id':args[2]}
+        self.runtime.shared=Atomic()
 
     def tearDown(self):
         self.stop=True;self.server.close();self.worker.join(timeout=2);self.temp.cleanup()
@@ -157,21 +137,7 @@ class DesktopRuntimeTests(unittest.TestCase):
         self.assertEqual([r['method'] for r in self.requests],['initialize','thread-owner-discovery','thread-follower-read-model-settings'])
         self.assertNotIn('PRIVATE_TOOL_PAYLOAD',json.dumps(value))
 
-    def test_steer_is_direct_owner_routed_and_checks_acknowledgement(self):
-        result=self.runtime.steer('chat-1','Keep the fix small','turn-1')
-        self.assertEqual(result['state'],'steered');request=self.requests[-1]
-        self.assertEqual(request['method'],'thread-follower-steer-turn');self.assertEqual(request['version'],1)
-        self.assertEqual(request['targetClientId'],'desktop-owner');self.assertEqual(request['params']['conversationId'],'chat-1')
-        self.assertEqual(request['params']['input'],[{'type':'text','text':'Keep the fix small','text_elements':[]}])
-        self.assertEqual(request['params']['attachments'],[])
-        self.assertEqual(result['client_id'],request['params']['clientUserMessageId'])
-        self.assertNotIn('approvalPolicy',json.dumps(request));self.assertNotIn('sandbox',json.dumps(request))
-        self.wrong_turn=True
-        with self.assertRaises(RuntimeUnavailable):self.runtime.steer('chat-1','Another correction','turn-1')
 
-    def test_native_steer_preserves_photo_inputs(self):
-        self.runtime.steer('chat-1','Inspect this photo','turn-1',photos=['/private/companion/photo.jpg'])
-        self.assertEqual(self.requests[-1]['params']['input'][-1],{'type':'localImage','path':'/private/companion/photo.jpg'})
 
     def test_model_changes_use_next_turn_native_settings_and_readback_without_permissions(self):
         result=self.runtime.set_model('chat-1','another-model','medium');self.assertEqual(result['model'],'another-model')
@@ -262,39 +228,33 @@ class DesktopRuntimeTests(unittest.TestCase):
         self.runtime.queue_claimer=claim
         return {'id':'queued-1','text':'Queued task','client_id':'original-client-1','revision':'a'*64}
 
-    def test_queue_promotion_claims_original_before_steering_once(self):
-        item=self.promotion_runtime();result=self.runtime.promote_queued('chat-1',item,'turn-1')
-        self.assertEqual(result['state'],'steered');self.assertFalse(self.queued)
-        self.assertEqual(self.requests[-1]['method'],'thread-follower-steer-turn')
-        self.assertEqual(self.requests[-1]['params']['clientUserMessageId'],'original-client-1')
-        self.assertEqual(self.runtime.queue_recovery('chat-1',str),[])
-        self.assertNotIn(b'Queued task',(self.home/'promotions.sqlite').read_bytes())
 
-    def test_promotion_owner_failure_is_retryable_and_keeps_original_queue(self):
-        item=self.promotion_runtime();self.error='no-client-found'
-        with self.assertRaises(QueueNotClaimed):self.runtime.promote_queued('chat-1',item,'turn-1')
-        self.assertTrue(self.queued)
+
+
+
+    def test_atomic_shared_steer_gets_exact_turn_identity_and_photos_without_follower_retry(self):
+        result=self.runtime.steer('chat-1','Keep the fix small','turn-1',photos=['/private/photo.jpg'])
+        self.assertEqual(result['state'],'steered')
+        self.assertEqual(self.atomic_calls[-1][:3],('chat-1','Keep the fix small','turn-1'))
+        self.assertEqual(self.atomic_calls[-1][3]['photos'],['/private/photo.jpg'])
         self.assertNotIn('thread-follower-steer-turn',[r['method'] for r in self.requests])
-        self.error=None
-        self.assertEqual(self.runtime.promote_queued('chat-1',item,'turn-1')['state'],'steered')
+        self.assertEqual(result['client_id'],self.atomic_calls[-1][3]['client_id'])
 
-    def test_uncertain_promotion_preserves_text_without_automatic_replay(self):
-        item=self.promotion_runtime();self.fail_after_claim=True
-        with self.assertRaises(RuntimeUnavailable):self.runtime.promote_queued('chat-1',item,'turn-1')
-        self.assertFalse(self.queued);pending=self.runtime.queue_recovery('chat-1',str)
-        self.assertEqual(pending[0]['text'],'Queued task')
-        count=len(self.requests);self.runtime.queue_recovery('chat-1',str);self.assertEqual(len(self.requests),count)
-        self.runtime.receipt_reader=lambda *_:True;self.assertEqual(self.runtime.queue_recovery('chat-1',str),[])
+    def test_missing_atomic_channel_disables_steer_and_never_uses_unbound_follower(self):
+        self.runtime.shared.present=lambda:False
+        self.runtime.shared.capabilities=lambda _: {'steer':False}
+        self.assertFalse(self.runtime.capabilities('chat-1')['steer'])
+        with self.assertRaises(RuntimeUnavailable):self.runtime.steer('chat-1','Keep this turn','turn-1')
+        self.assertEqual(self.atomic_calls,[])
+        self.assertNotIn('thread-follower-steer-turn',[r['method'] for r in self.requests])
 
-    def test_known_preclaim_failure_keeps_original_queued_and_safe_retry_retains_recovery(self):
-        item=self.promotion_runtime();claim=self.runtime.queue_claimer
-        def unavailable(*_):raise QueueNotClaimed('Not claimed')
-        self.runtime.queue_claimer=unavailable
+    def test_queue_promotion_rejects_before_claim_even_with_valid_snapshot(self):
+        item=self.promotion_runtime();claimed=[]
+        self.runtime.queue_claimer=lambda *_:claimed.append(True)
         with self.assertRaises(QueueNotClaimed):self.runtime.promote_queued('chat-1',item,'turn-1')
-        self.assertTrue(self.queued);self.assertEqual(self.runtime.queue_recovery('chat-1',str),[])
-        self.runtime.queue_claimer=claim;self.fail_after_claim=True
-        with self.assertRaises(RuntimeUnavailable):self.runtime.promote_queued('chat-1',item,'turn-1')
-        self.assertEqual(self.runtime.queue_recovery('chat-1',str)[0]['text'],'Queued task')
+        self.assertTrue(self.queued);self.assertEqual(claimed,[])
+        self.assertEqual(self.runtime.queue_recovery('chat-1',str),[])
+        self.assertFalse(self.runtime.capabilities('chat-1')['queue_steer'])
 
 
 if __name__=='__main__':unittest.main()

@@ -38,7 +38,7 @@ def pending_questions(rows, redact):
     """Use persisted async metadata and accepted replies, never infer questions from prose.
 
     Rows are chronological and independent of the conversation's visible history page.
-    A completed turn can still have an unanswered async question, as on the desktop.
+    The caller scopes rows to the latest in-progress turn, matching the desktop.
     """
     pending = {}
     for row in rows:
@@ -70,6 +70,20 @@ def pending_questions(rows, redact):
             for reply in replies(reply_text(value)):
                 pending.pop(reply['questionItemId'], None)
     return list(pending.values())
+
+
+def live_question_ids(turn):
+    """Mirror the owner's unanswered-async-question status for its latest turn."""
+    if not isinstance(turn,dict) or turn.get('status')!='inProgress' or not turn.get('turnId'):return []
+    pending={}
+    for item in turn.get('items',[]):
+        if not isinstance(item,dict):continue
+        if item.get('type')=='agentMessage' and isinstance(item.get('questions'),list):
+            for index,_ in enumerate(item['questions']):
+                pending[json.dumps(['request_user_input_async',item.get('id'),index],separators=(',',':'))]=True
+        elif item.get('type')=='userMessage' or item.get('type')=='steeringUserMessage' and item.get('status')=='accepted':
+            for reply in replies(reply_text(item)):pending.pop(reply['questionItemId'],None)
+    return list(pending)
 
 
 def answer_envelope(question, answer):
