@@ -344,3 +344,7 @@ html {background:var(--bg)}
 .photo-storage-row img {width:48px;height:48px;object-fit:cover;border-radius:9px}
 .photo-storage-row span {flex:1;min-width:0;overflow-wrap:anywhere;font-size:13px;color:var(--muted)}
 .photo-storage-row button {min-height:44px}
+
+/* Confirmed queue backups are quiet history, separate from delivery warnings. */
+.queue-versions,.queue-versions .queue-recovery {background:var(--panel);border-color:var(--border);padding:0}
+body:not(.keyboard-open) .pending:has(>.queue-versions) {max-height:min(30dvh,260px)}
