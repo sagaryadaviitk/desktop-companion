@@ -18,6 +18,7 @@ import time
 import uuid
 
 from runtime import RuntimeUnavailable, SharedRuntime, RpcClient
+from approvals import approval_views, pending_requests, response_for, ApprovalChanged
 
 
 def queue_input_matches(inputs,message,photos):
@@ -112,6 +113,11 @@ class DesktopClient:
     VERSIONS = {'initialize': 0, 'thread-owner-discovery': 1,
                 'thread-follower-read-model-settings': 1,
                 'thread-follower-steer-turn': 1, 'thread-follower-start-turn': 2,
+                'thread-follower-command-approval-decision':1,
+                'thread-follower-file-approval-decision':1,
+                'thread-follower-permissions-request-approval-response':1,
+                'thread-follower-submit-mcp-server-elicitation-response':1,
+                'thread-follower-submit-user-input':1,
                 'thread-follower-update-thread-settings':2}
 
     def __init__(self, path, timeout=5):
@@ -178,7 +184,7 @@ class DesktopClient:
     def close(self):
         self.socket.close()
 
-    def execution_state(self, thread_id, owner):
+    def conversation_state(self, thread_id, owner):
         """Observe one owner snapshot, then unsubscribe; never acquire ownership."""
         def follow(enabled):
             self._send({'type':'broadcast','method':'thread-stream-following-changed','version':1,
@@ -195,19 +201,26 @@ class DesktopClient:
                 if value.get('type')!='broadcast' or value.get('sourceClientId')!=owner or value.get('method')!='thread-stream-state-changed' or value.get('version')!=11 or params.get('hostId')!='local' or params.get('conversationId')!=thread_id or change.get('type')!='snapshot':continue
                 state=change.get('conversationState',{})
                 if state.get('id')!=thread_id:raise RuntimeUnavailable('Desktop snapshot identity changed.')
-                runtime=state.get('threadRuntimeStatus',{}).get('type')
-                if runtime not in ('active','idle','notLoaded','systemError'):raise RuntimeUnavailable('Desktop execution status is unavailable.')
-                turns=state.get('turns',[])
-                history=state.get('turnHistory') or {}
-                if history.get('kind')=='canonical':turns=list(history.get('history',{}).get('entitiesByKey',{}).values())
-                active=[t for t in turns if isinstance(t,dict) and t.get('status')=='inProgress' and t.get('turnId')]
-                turn=max(active,key=lambda t:t.get('turnStartedAtMs') or 0,default={}).get('turnId')
-                return {'status':'working' if runtime=='active' else 'idle' if runtime=='idle' else 'unknown',
-                        'turn_id':turn if runtime=='active' else None,'checked_at':int(time.time()*1000)}
+                return state
             raise RuntimeUnavailable('Live desktop state timed out.')
         finally:
             try:follow(False)
             except OSError:pass
+
+    def execution_state(self,thread_id,owner,include_approvals=False,redact=str):
+        state=self.conversation_state(thread_id,owner)
+        runtime=state.get('threadRuntimeStatus',{}).get('type')
+        if runtime not in ('active','idle','notLoaded','systemError'):raise RuntimeUnavailable('Desktop execution status is unavailable.')
+        turns=state.get('turns',[])
+        history=state.get('turnHistory') or {}
+        if history.get('kind')=='canonical':turns=list(history.get('history',{}).get('entitiesByKey',{}).values())
+        active=[t for t in turns if isinstance(t,dict) and t.get('status')=='inProgress' and t.get('turnId')]
+        turn=max(active,key=lambda t:t.get('turnStartedAtMs') or 0,default={}).get('turnId')
+        result={'status':'working' if runtime=='active' else 'idle' if runtime=='idle' else 'unknown',
+                'turn_id':turn if runtime=='active' else None,'checked_at':int(time.time()*1000),
+                'approval_count':len([r for r in pending_requests(state) if r.get('params',{}).get('threadId')==thread_id])}
+        if include_approvals:result['approvals']=approval_views(state,owner,redact)
+        return result
 
     def __enter__(self):return self
     def __exit__(self, *_):self.close()
@@ -216,7 +229,7 @@ class DesktopClient:
 class DesktopRuntime:
     REASON = 'Live desktop controls are disconnected. Queue can still save a follow-up for later.'
 
-    def __init__(self, home, thread_reader, client_factory=DesktopClient, shared=None,queue_reader=None,receipt_reader=None,promotions=None,queue_claimer=claim_queued_message):
+    def __init__(self, home, thread_reader, client_factory=DesktopClient, shared=None,queue_reader=None,receipt_reader=None,promotions=None,queue_claimer=claim_queued_message,approval_redactor=str):
         self.home = Path(home).resolve()
         self.socket = self.home / 'ipc' / 'ipc.sock'
         self.thread_reader = thread_reader
@@ -224,6 +237,7 @@ class DesktopRuntime:
         self.shared = shared or SharedRuntime(home)
         self.queue_reader=queue_reader;self.receipt_reader=receipt_reader;self.promotions=promotions
         self.queue_claimer=queue_claimer
+        self.approval_redactor=approval_redactor
 
     def present(self):
         try:
@@ -254,7 +268,7 @@ class DesktopRuntime:
         try:
             with self.client(timeout=2) as client:
                 owner, settings = self.owner(client, thread_id)
-                execution=client.execution_state(thread_id,owner)
+                execution=client.execution_state(thread_id,owner,include_approvals=True,redact=self.approval_redactor)
             active = execution['status']=='working' and bool(execution['turn_id'])
             return {**value, 'steer': active, 'send_now': execution['status']=='idle', 'queue_steer':active and self.promotions is not None, 'model_selection':True,'connected': True,'execution':execution,
                     'reason': 'Connected to the desktop chat.', 'model': settings.get('model'),
@@ -270,6 +284,23 @@ class DesktopRuntime:
                 return client.execution_state(thread_id,owner)
         except (OSError,ValueError,KeyError,RuntimeUnavailable):
             return {'status':'unknown','turn_id':None,'checked_at':int(time.time()*1000)}
+
+    def respond_approval(self,thread_id,identity,revision,choice,answers):
+        """Fresh exact request, one response, then verify removal. Never queue/replay."""
+        with self.client() as client:
+            owner,_=self.owner(client,thread_id)
+            if self.thread_reader(thread_id).get('archived'):raise ApprovalChanged('Restore this chat on your Mac before responding.')
+            state=client.conversation_state(thread_id,owner)
+            method,params=response_for(state,owner,identity,revision,choice,answers,self.approval_redactor)
+            result=client.call(method,params,target=owner)
+            if result.get('handledByClientId')!=owner or result.get('result',{}).get('ok') is not True:
+                raise RuntimeUnavailable('Approval delivery is unconfirmed. Check the request on your Mac; it will not be resent automatically.')
+            # IPC acknowledgement alone can be a no-op for a request already resolved.
+            # Removal is confirmation of desktop handling, not proof the action succeeded.
+            after=client.conversation_state(thread_id,owner)
+            if any(r.get('id')==params['requestId'] and type(r.get('id')) is type(params['requestId']) for r in pending_requests(after)):
+                raise RuntimeUnavailable('The desktop has not confirmed this response. Check the prompt on your Mac before trying again.')
+            return {'state':'answered','message':'Response accepted by your desktop. The requested action may still be running.'}
 
     @staticmethod
     def restore(thread, message, identity):

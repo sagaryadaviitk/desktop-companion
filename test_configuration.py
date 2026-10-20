@@ -31,7 +31,7 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertIn('desktop_companion/web/attachments.js',names)
                 for name in ['new_chat.js','appearance.js','status.js','theme.css']:self.assertIn('desktop_companion/web/'+name,names)
                 self.assertIn('desktop_companion/system_status.py',names)
-                for name in ('.gitattributes','AGENTS.md','CONTRIBUTING.md','.github/workflows/checks.yml','web/queue.js','web/conversation.js','test_conversation.cjs','web/shell.js','test_shell.cjs'):
+                for name in ('.gitattributes','AGENTS.md','CONTRIBUTING.md','.github/workflows/checks.yml','approvals.py','web/approvals.js','test_approvals.py','test_approvals_ui.cjs','web/queue.js','web/conversation.js','test_conversation.cjs','web/shell.js','test_shell.cjs'):
                     self.assertIn('desktop_companion/'+name,names)
                 for name in ['worker.mjs.template','offline.html','build.py']:self.assertIn('desktop_companion/cloudflare_fallback/'+name,names)
                 self.assertFalse(any('/.state/' in n or n.endswith('config.local.json') or 'slack' in n or n.endswith('.app') for n in names))

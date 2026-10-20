@@ -13,10 +13,10 @@ const readRequests=new Set();
 let displayedRevision=null,readFrame=0,refreshPromise=null,chatRequestVersion=0;
 let catalogRevision='',conversationRevision='',chatRefreshPromise=null;
 const deliveryReceipts=CompanionConversation.receipts();
-let conversationScroll=null;
+let conversationScroll=null,approvalUI=null;
 const loadedBuild=document.querySelector('meta[name=companion-build]').content;
 let updater=null;
-function hasUnsentDraft(){return Boolean(newChatFlow?.hasDraft())||[...drafts.values()].some(value=>value.trim())||[...photoDrafts.values()].some(value=>value.length)||[...questionDrafts.values()].some(value=>typeof value==='string'?value.trim():value?.answer||value?.text);}
+function hasUnsentDraft(){return Boolean(approvalUI?.hasDraft())||Boolean(newChatFlow?.hasDraft())||[...drafts.values()].some(value=>value.trim())||[...photoDrafts.values()].some(value=>value.length)||[...questionDrafts.values()].some(value=>typeof value==='string'?value.trim():value?.answer||value?.text);}
 function executionStatus(chat){if(!connected&&chat.last_recorded_turn?.status==='inProgress')return 'unknown';return currentStatus?.execution?.[chat.id]?.status||(chat.last_recorded_turn?.status==='inProgress'?'unknown':chat.last_recorded_turn?.status==='failed'?'failed':chat.last_recorded_turn?.status==='interrupted'?'paused':'idle');}
 const questionDrafts=new Map(),questionBusy=new Set();
 const questionErrors=new Map();
@@ -59,7 +59,7 @@ function lockScreen(){
   for(const id of ['usage-dialog','model-dialog','phone-dialog','questions-dialog','host-dialog','new-chat-dialog','account-dialog','chat-actions-dialog','system-dialog'])if(el(id).open)el(id).close();
   newChatFlow?.reset();el('new-chat').disabled=true;
   healthFlow?.reset();
-  queueUI?.reset();
+  queueUI?.reset();approvalUI?.reset();
   chats=[];projects=[];selected=null;selectedData=null;csrf="";lastSignature="";panelSignature="";projectSignature="";initialSelectionPending=true;messageMap.clear();nextBefore=null;loadedEarlier=false;
   el("chats").replaceChildren();el("messages").replaceChildren();el("pending").replaceChildren();el("instruction").value="";
   drafts.clear();
@@ -124,14 +124,14 @@ function mainChats(){return chats.filter(chat=>!chat.archived&&!chat.subagent);}
 function renderHome(){
   const main=mainChats(),unread=main.filter(chat=>chat.unread),working=main.filter(chat=>executionStatus(chat)==='working');
   el('unread-count').textContent=unread.length;
-  el('reply-count').textContent=main.filter(chat=>chat.question_count>0).length;
+  el('reply-count').textContent=main.filter(chat=>chat.question_count>0||approvalCount(chat)>0).length;
   for(const view of ['recent','unread','working','reply'])el('quick-'+view).setAttribute('aria-pressed',String(inboxView===view));
   const project=el('project-filter').selectedOptions[0]?.textContent||'All projects',filter=el('chat-filter').selectedOptions[0]?.textContent||'Main chats';
   el('filter-summary').textContent=project.replace(' & folders','')+' · '+filter;
   el('mark-all-read').disabled=markingAll||!connected||!visibleChats().some(chat=>chat.unread);
   el('mark-all-read').textContent=markingAll?'Marking…':'Mark seen';
   const visible=visibleChats();
-  const signature=JSON.stringify([visible.map(chat=>[chat.id,chat.title,chat.preview,chat.preview_role,chat.last_activity_at,chat.updated_at,chat.unread,chat.question_count,chat.project_keys,executionStatus(chat)]),statsKey(main),projects.map(p=>[p.id,p.name,p.chat_count]),inboxView,el('project-filter').value,el('chat-filter').value,el('search').value]);
+  const signature=JSON.stringify([visible.map(chat=>[chat.id,chat.title,chat.preview,chat.preview_role,chat.last_activity_at,chat.updated_at,chat.unread,chat.question_count,approvalCount(chat),chat.project_keys,executionStatus(chat)]),statsKey(main),projects.map(p=>[p.id,p.name,p.chat_count]),inboxView,el('project-filter').value,el('chat-filter').value,el('search').value]);
   if(signature===homeSignature)return;homeSignature=signature;
   const stats=[[String(unread.length),'Unread updates'],[String(working.length),'Working now'],[String(projects.filter(p=>p.kind==='project').length),'Projects']];
   el('inbox-overview').replaceChildren();el('home-stats').replaceChildren();
@@ -144,7 +144,7 @@ function renderHome(){
   const ordered=visible;
   for(const chat of ordered){const button=chatCard(chat,true);el('home-chats').append(button);}
   if(!ordered.length){const empty=document.createElement('p');empty.className='empty-message';empty.textContent=inboxView==='unread'?'You’re caught up. New replies will appear here.':'No matching conversations. Try another project or filter.';el('home-chats').append(empty);}
-  el('home-chats-heading').textContent=inboxView==='reply'?'Questions for you':inboxView==='unread'?'Unread conversations':inboxView==='working'?'Working now':'Recent conversations';
+  el('home-chats-heading').textContent=inboxView==='reply'?'Needs your response':inboxView==='unread'?'Unread conversations':inboxView==='working'?'Working now':'Recent conversations';
   const fresh=visible.filter(chat=>chat.unread).length;el('home-updated').textContent=fresh?`${fresh} with unread updates`:inboxView==='unread'?'You’re caught up':`${visible.length} conversations`;
 }
 function statsKey(chats){return [chats.length,chats.filter(chat=>chat.unread).length,chats.filter(chat=>executionStatus(chat)==='working').length];}
@@ -158,16 +158,17 @@ function chatCard(chat,home=false){
   const preview=document.createElement('span');preview.className='chat-preview';preview.textContent=chat.preview?(chat.preview_role==='user'?'You: ':'')+chat.preview:'Open the recorded conversation';
   const meta=document.createElement('span');meta.className='chat-meta';const workspace=document.createElement('span'),project=projectLabel(chat);let tint=0;for(const char of project.id)tint=(tint*31+char.charCodeAt(0))>>>0;workspace.className='project-label project-color-'+(tint%5);workspace.textContent=project.name;workspace.title=(project.kind==='project'?'Project: ':'Folder: ')+project.name;const time=document.createElement('time');time.textContent=shortTime(chat.last_activity_at||chat.last_message_at||chat.updated_at);meta.append(workspace,time);
   const tags=document.createElement('span');tags.className='chat-tags';
-  const status=executionStatus(chat),badge=document.createElement('span');badge.className='status-tag '+(status==='working'?'inProgress':status);badge.textContent=status==='working'?'Working':status==='failed'?'Failed':status==='paused'?'Paused':status==='unknown'?'Status unavailable':'Idle';badge.title=status==='unknown'?'Open this chat to check its live desktop connection.':'Desktop state: '+status;button.classList.add(status==='working'?'working-chat':'idle-chat');
+  const status=executionStatus(chat),badge=document.createElement('span');badge.className='status-tag '+(status==='working'?'inProgress':status);badge.textContent=approvalCount(chat)?'Needs response':status==='working'?'Working':status==='failed'?'Failed':status==='paused'?'Paused':status==='unknown'?'Status unavailable':'Idle';badge.title=status==='unknown'?'Open this chat to check its live desktop connection.':'Desktop state: '+status;button.classList.add(status==='working'?'working-chat':'idle-chat');
   const headingRow=document.createElement('span');headingRow.className='chat-heading-row';headingRow.append(heading,badge);
   if(chat.archived||chat.subagent){const kind=document.createElement('span');kind.textContent=chat.archived?'Archived':'Subagent';tags.append(kind);}
   if(chat.unread){const newTag=document.createElement('span');newTag.className='new-tag';newTag.textContent='Unread';tags.append(newTag);}
+  if(approvalCount(chat)){const approval=document.createElement('span');approval.className='approval-tag';approval.textContent=`${approvalCount(chat)} live request${approvalCount(chat)===1?'':'s'}`;tags.prepend(approval);}
   if(chat.question_count){const reply=document.createElement('span');reply.className='reply-tag';reply.textContent=`${chat.question_count} question${chat.question_count===1?'':'s'}`;tags.prepend(reply);}
   button.append(headingRow,preview,meta,tags);button.addEventListener('click',()=>selectChat(chat.id));return button;
 }
 
 function chooseInbox(view){inboxView=view;el('chat-filter').value=view==='working'?'working':'active';goHome();renderChats();renderHome();}
-function goHome(){document.activeElement?.blur();const wasChat=new URLSearchParams(location.search).has('chat');document.body.classList.remove('chat-open');document.body.classList.add('home-open');el('home-screen').hidden=false;const url=new URL(location.href);url.searchParams.delete('chat');if(wasChat)history.pushState({companion:true,view:'list'},'',url.pathname+url.search);renderHome();renderChats();}
+function goHome(){if(el('approvals-dialog').open)el('approvals-dialog').close();el('approvals-banner').hidden=true;document.activeElement?.blur();const wasChat=new URLSearchParams(location.search).has('chat');document.body.classList.remove('chat-open');document.body.classList.add('home-open');el('home-screen').hidden=false;const url=new URL(location.href);url.searchParams.delete('chat');if(wasChat)history.pushState({companion:true,view:'list'},'',url.pathname+url.search);renderHome();renderChats();}
 
 function renderUsage(){
   const usage=currentStatus?.usage,weekly=usage?.weekly||[],main=weekly.find(item=>item.id==='codex')||weekly[0];
@@ -267,7 +268,13 @@ async function addPhotoFiles(files){
 if(window.CompanionAttachments)CompanionAttachments.install({addFiles:addPhotoFiles,canAdd:()=>Boolean(selected&&connected&&selectedData?.control?.available&&!sending),onError:showCommandResult,getContext:()=>authVersion+':'+selected});
 else el('add-photo').addEventListener('click',()=>el('photo-input').click());
 
+approvalUI=CompanionApprovals.create({dialog:el('approvals-dialog'),banner:el('approvals-banner'),panel:el('approval-cards'),close:el('approvals-close'),summary:el('approvals-summary'),
+  submit:payload=>api('/api/approvals/respond',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify(payload)}),
+  changed:result=>{if(result)showCommandResult(result.message,true);refreshChat(true);}});
+function approvalCount(chat){return connected?currentStatus?.execution?.[chat.id]?.approval_count||0:0;}
+function renderApprovals(){approvalUI.update({thread:selected,visible:Boolean(selected&&!document.body.classList.contains('home-open')),connected:Boolean(connected&&selectedData?.control?.live?.connected&&!selectedData?.archived),requests:selectedData?.control?.live?.execution?.approvals||[]});}
 function renderQuestions(){
+  renderApprovals();
   const questions=selectedData?.questions||[],banner=el('questions-banner');
   banner.hidden=!selected||!questions.length||document.body.classList.contains('home-open');
   const unanswered=questions.filter(q=>q.delivery==='unanswered').length,queued=questions.filter(q=>q.delivery==='queued').length;
@@ -350,7 +357,7 @@ fitViewport();
 function visibleChats(){
   const query = el("search").value.trim().toLowerCase();
   const project=el("project-filter").value,filter=el("chat-filter").value;
-  return chats.filter(chat=> (inboxView!=='unread'||chat.unread)&&(inboxView!=='reply'||chat.question_count>0)&&(!project||(chat.project_keys||[chat.project_key]).includes(project))&&`${chat.title} ${chat.workspace} ${projectLabel(chat).name} ${chat.preview||''} ${chat.id}`.toLowerCase().includes(query)&&
+  return chats.filter(chat=> (inboxView!=='unread'||chat.unread)&&(inboxView!=='reply'||chat.question_count>0||approvalCount(chat)>0)&&(!project||(chat.project_keys||[chat.project_key]).includes(project))&&`${chat.title} ${chat.workspace} ${projectLabel(chat).name} ${chat.preview||''} ${chat.id}`.toLowerCase().includes(query)&&
     (filter==="all"||filter==="active"&&!chat.archived&&!chat.subagent||filter==="archived"&&chat.archived||filter==="pinned"&&chat.pinned||filter==="subagents"&&chat.subagent||filter==="working"&&!chat.archived&&executionStatus(chat)==="working"));
 }
 
@@ -377,7 +384,7 @@ function renderChats() {
   renderHome();
   el("chat-count").textContent = `${visible.length}`;
   el("workspace-summary").textContent=`${projects.filter(project=>project.kind==="project").length} projects · ${chats.length} chats · ${chats.filter(chat=>chat.archived).length} archived`;
-  const signature=JSON.stringify([visible,visible.map(executionStatus),selected,inboxView,el('project-filter').value,projects.map(p=>[p.id,p.name]),document.body.classList.contains('home-open')]);if(signature===chatSignature)return;chatSignature=signature;
+  const signature=JSON.stringify([visible,visible.map(executionStatus),visible.map(approvalCount),selected,inboxView,el('project-filter').value,projects.map(p=>[p.id,p.name]),document.body.classList.contains('home-open')]);if(signature===chatSignature)return;chatSignature=signature;
   const panel=el("chats"),oldTop=panel.scrollTop,focused=document.activeElement?.dataset.chat;
   panel.replaceChildren();
   // The catalog already uses the desktop's saved recency order. Badges never change it.
@@ -390,7 +397,7 @@ function renderChats() {
 }
 
 function applyFilter(){
-  el('questions-banner').hidden=true;
+  el('questions-banner').hidden=true;el('approvals-banner').hidden=true;
   inboxView=el('chat-filter').value==='working'?'working':'recent';
   initialSelectionPending=false;
   renderChats();
@@ -440,7 +447,7 @@ function renderPanels(data){
   const list=document.createElement("dl");for(const [label,value]of fields)list.append(text("dt",label),text("dd",value));details.append(list);
   details.append(text("p","Older chats are grouped using saved project folders when no project ID was recorded. Projects sharing the same folder can contain the same chat.","panel-help"));
   details.append(text("h4","Available here"),text("p","Projects and folders, new local chats, active and archived chats, subagent chats, conversation history, recorded activity, saved patches, and photo messages. Connected chats support direct Send, Steer, and model selection.","panel-help"));
-  details.append(text('h4','Questions for you'),text('p','Assistant questions include the same saved choices and a free-text answer. Replies use the desktop question format and go directly to a connected active chat. When live controls are disconnected, a reply is explicitly queued. A question clears after its reply is recorded. Runtime approvals and macOS prompts still require the desktop.','panel-help'));
+  details.append(text('h4','Questions for you'),text('p','Assistant questions include the same saved choices and a free-text answer. Replies use the desktop question format and go directly to a connected active chat. When live controls are disconnected, a reply is explicitly queued. A question clears after its reply is recorded. Live approvals have a separate Review panel. Secure macOS dialogs and sign-ins require your Mac.','panel-help'));
   details.append(text("h4","Your drafts and privacy"),text("p","Drafts stay with each chat while this page is open, including during a connection outage. Reloading or signing out clears them. Conversation text is read from your Mac; tool output and internal reasoning stay private. Detected credentials are hidden.","panel-help"));
   details.append(text('h4','Live controls'),text('p',data.control?.live?.model_selection?'The shared desktop connection can change this chat’s model for subsequent turns. Steer is available while an accepted active turn is running.':data.control?.live?.reason||'The shared desktop control connection is unavailable.','panel-help'));
   details.append(text('h4','Desktop apps while locked'),text('p',currentStatus?.computer_use?.state==='blocked'?'The last native Chrome test could not unlock the locked Mac, even though Locked Use was installed. Background work and direct message delivery are separate. Tap Mac battery above for the check details.':'Tap Mac battery above to see the last locked-screen desktop-app check.','panel-help'));
@@ -449,6 +456,7 @@ function renderPanels(data){
 }
 
 async function selectChat(id,navigate=true) {
+  if(el('approvals-dialog').open)el('approvals-dialog').close();el('approvals-banner').hidden=true;
   const reopening=document.body.classList.contains('home-open');
   if(el('questions-dialog').open)el('questions-dialog').close();el('questions-banner').hidden=true;questionSignature='';
   const url=new URL(location.href);url.searchParams.set("chat",id);
@@ -472,7 +480,7 @@ async function selectChat(id,navigate=true) {
 function renderMessages(preservePosition=false){
   const messages=[...messageMap.values()].sort((a,b)=>(a.ordinal??a.timestamp??0)-(b.ordinal??b.timestamp??0));
   const receipts=deliveryReceipts.list(selected,messages),working=CompanionConversation.working(selectedData?.control?.live?.execution,connected);
-  const signature=JSON.stringify([messages,nextBefore,loadingEarlier,receipts,working]);
+  const signature=JSON.stringify([messages,nextBefore,loadingEarlier,receipts,working,selectedData?.control?.live?.execution?.approval_count]);
   if(signature===lastSignature)return;
   const panel=el("messages"),nearBottom=conversationScroll?.following()??panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
   const first=!lastSignature,oldTop=panel.scrollTop,top=panel.getBoundingClientRect().top;
@@ -536,7 +544,7 @@ function renderConversationTail(panel,receipts,working){
   }
   if(working){const status=document.createElement('div');status.className='working-indicator';status.setAttribute('role','status');
     const orb=document.createElement('span');orb.className='working-orb';orb.setAttribute('aria-hidden','true');
-    const text=document.createElement('span');text.textContent='Working on your Mac…';status.append(orb,text);tail.append(status);}
+    const text=document.createElement('span');text.textContent=selectedData?.control?.live?.execution?.approval_count?'Waiting for your response…':'Working on your Mac…';status.append(orb,text);tail.append(status);}
 }
 
 async function loadEarlier(){
@@ -580,7 +588,7 @@ async function readCurrentChat() {
     el("title").textContent=data.title; el("workspace").textContent=data.workspace||"LOCAL CHAT";
     const labels={inProgress:"In progress at last recorded update",completed:"Last turn completed",interrupted:"Last turn interrupted",failed:"Last turn failed"};
     const execution=data.control.live?.execution;
-    const status=execution?.status==='working'?'Working now':execution?.status==='idle'?'Ready for your message':data.last_recorded_turn?.status==='inProgress'?'Live status unavailable':labels[data.last_recorded_turn?.status]||'Recorded conversation';
+    const status=execution?.approval_count?'Waiting for your response':execution?.status==='working'?'Working now':execution?.status==='idle'?'Ready for your message':data.last_recorded_turn?.status==='inProgress'?'Live status unavailable':labels[data.last_recorded_turn?.status]||'Recorded conversation';
     const timestamps=data.messages.map(message=>message.timestamp||0);
     const latest=Math.max(data.updated_at||0,...timestamps);
     el("activity").textContent=`${status} · Updated ${shortTime(latest)}`;
@@ -762,7 +770,7 @@ el("composer").addEventListener("submit",async event=>{
   finally{sending=false;if(version===authVersion){renderMessages();updateComposer();await refreshChat(true);}}
 });
 el('connect-chat').addEventListener('click',async()=>{if(connectingChat||!selected)return;const target=selected;connectingChat=true;updateComposer();try{const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});if(target===selected){showCommandResult(result.message,true);await refreshChat();}}catch(error){if(target===selected)showCommandResult(error.message);}finally{connectingChat=false;updateComposer();}});
-if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else if(document.body.classList.contains('home-open')||!selected)showNotice(message);else showCommandResult(message);}});
+if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>approvalUI?.busy()||sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else if(document.body.classList.contains('home-open')||!selected)showNotice(message);else showCommandResult(message);}});
 el('app-reload').addEventListener('click',()=>updater?.reload());
 window.addEventListener('pageshow',event=>{if(event.persisted&&!document.body.classList.contains('signed-out'))refreshAll(true);});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&!document.body.classList.contains("signed-out")){scheduleMarkViewed();if(document.body.classList.contains("booting"))initialize();else refreshAll();}});
