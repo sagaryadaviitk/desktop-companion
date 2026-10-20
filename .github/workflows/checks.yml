@@ -1,0 +1,68 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: macOS / Python ${{ matrix.python }}
+    runs-on: macos-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Check that private runtime files are not tracked
+        run: |
+          python - <<'PY'
+          from pathlib import PurePosixPath
+          import subprocess
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          blocked = []
+          for value in filter(None, paths):
+              path = PurePosixPath(value)
+              if (set(path.parts) & {'.state', '.cloudflared', '__pycache__', '.wrangler'}
+                  or path.name == 'config.local.json'
+                  or path.name == '.env'
+                  or path.name.startswith('.env.') and path.name != '.env.example'
+                  or path.suffix in {'.sqlite', '.db', '.zip', '.log', '.pyc'}
+                  or any(part.endswith('.app') for part in path.parts)):
+                  blocked.append(value)
+          if blocked:
+              raise SystemExit('Remove private/generated files from Git: ' + ', '.join(blocked))
+          print('Tracked source contains no prohibited runtime paths.')
+          PY
+      - name: Run Python tests
+        run: python -m unittest discover -p 'test_*.py' -q
+      - name: Run JavaScript tests
+        run: node --test test_*.cjs
+      - name: Compile native control app without installing it
+        if: matrix.python == '3.14'
+        run: >-
+          xcrun swiftc -O -swift-version 5 -parse-as-library
+          -module-cache-path "$RUNNER_TEMP/swift-cache"
+          native/CompanionApp.swift native/Appearance.swift native/SystemMap.swift
+          -o "$RUNNER_TEMP/DesktopCompanion"

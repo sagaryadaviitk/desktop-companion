@@ -1,0 +1,83 @@
+// Behavioral touch tests run without a browser or desktop commands.
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const vm=require('node:vm');
+const source=fs.readFileSync(__dirname+'/web/refresh.js','utf8');
+
+function fixture(refresh=async()=>true){
+  const listeners={},nodes={},states=new Set(['ready']);let blocked=false,mobile=true;
+  class Element {
+    constructor(){this.scrollTop=0;this.listeners={};this.attributes={};this.hidden=false;this.classList={toggle(){}};}
+    addEventListener(name,callback){this.listeners[name]=callback;}
+    setAttribute(name,value){this.attributes[name]=value;}
+    querySelector(){return nodes.icon;}
+    getBoundingClientRect(){return {top:210};}
+    closest(selector){return selector.startsWith('input')?(blocked?this:null):nodes.panel;}
+  }
+  for(const id of ['manual-refresh','pull-refresh','pull-refresh-label','icon','panel'])nodes[id]=new Element();
+  const document={getElementById:id=>nodes[id],documentElement:{style:{setProperty(){}}},body:{classList:{contains:name=>states.has(name)}},
+    querySelector:selector=>selector==='.topbar'?{getBoundingClientRect:()=>({bottom:53})}:states.has('dialog')?{}:null,
+    addEventListener:(name,callback,options)=>{listeners[name]=callback;listeners[name+'Options']=options;}};
+  const context={window:{},document,Element,setTimeout:()=>1,clearTimeout(){}};vm.runInNewContext(source,context);
+  const controller=context.window.CompanionRefresh.install({refresh,isMobile:()=>mobile});
+  function event(x=10,y=10,count=1,cancelable=true){return {target:nodes.panel,touches:Array.from({length:count},()=>({clientX:x,clientY:y})),cancelable,preventDefault(){this.prevented=true;}};}
+  return {listeners,nodes,states,controller,event,block:()=>blocked=true,desktop:()=>mobile=false};
+}
+
+test('a downward pull at the panel top refreshes once on release and cancels a card click',async()=>{
+  let count=0;const f=fixture(async()=>{count++;return true;});
+  f.listeners.touchstart(f.event());const move=f.event(10,110);f.listeners.touchmove(move);
+  assert.equal(move.prevented,true);assert.equal(f.nodes['pull-refresh-label'].textContent,'Release to refresh');assert.equal(count,0);
+  const end=f.event();await f.listeners.touchend(end);
+  assert.equal(end.prevented,true);assert.equal(count,1);assert.equal(f.nodes['pull-refresh-label'].textContent,'Up to date');
+  await f.listeners.touchend(f.event());assert.equal(count,1);
+  assert.equal(f.listeners.touchmoveOptions.passive,false);
+});
+
+test('pulls from the header stay native while early downward panel movement belongs to the soft refresh',async()=>{
+  let count=0;const f=fixture(async()=>{count++;return true;});f.states.add('home-open');f.nodes.chats=f.nodes.panel;
+  f.nodes.panel.closest=selector=>selector==='#sidebar'?f.nodes.panel:null;
+  f.listeners.touchstart(f.event());const headerMove=f.event(10,110);f.listeners.touchmove(headerMove);await f.listeners.touchend(f.event());
+  assert.equal(headerMove.prevented,undefined);assert.equal(count,0);
+  f.nodes.panel.closest=selector=>selector.startsWith('input')?null:f.nodes.panel;
+  f.listeners.touchstart(f.event());const firstMove=f.event(10,14);f.listeners.touchmove(firstMove);
+  assert.equal(firstMove.prevented,true);assert.equal(count,0);
+  f.listeners.touchmove(f.event(10,110));await f.listeners.touchend(f.event());assert.equal(count,1);
+});
+
+test('normal scrolling, short drags, horizontal swipes, and cancelled touches do not refresh',async()=>{
+  for(const mode of ['scrolled','short','horizontal','up','cancel','pinch','uncancelable']){
+    let count=0;const f=fixture(async()=>{count++;return true;});
+    if(mode==='scrolled')f.nodes.panel.scrollTop=20;
+    f.listeners.touchstart(f.event());
+    f.listeners.touchmove(mode==='short'?f.event(10,45):mode==='horizontal'?f.event(120,20):mode==='up'?f.event(10,-50):mode==='pinch'?f.event(10,110,2):mode==='uncancelable'?f.event(10,110,1,false):f.event(10,110));
+    if(mode==='cancel')f.listeners.touchcancel();
+    await f.listeners.touchend(f.event());assert.equal(count,0,mode);
+  }
+});
+
+test('typing, dialogs, links/code, desktop pointers, and signed out views keep their normal gestures',async()=>{
+  for(const mode of ['keyboard-open','dialog','signed-out','blocked','desktop']){
+    let count=0;const f=fixture(async()=>{count++;return true;});
+    if(mode==='blocked')f.block();else if(mode==='desktop')f.desktop();else f.states.add(mode);
+    if(mode==='signed-out')f.states.delete('ready');
+    f.listeners.touchstart(f.event());const move=f.event(10,110);f.listeners.touchmove(move);await f.listeners.touchend(f.event());
+    assert.equal(count,0,mode);assert.notEqual(move.prevented,true,mode);
+  }
+});
+
+test('manual refresh reports failure and deduplicates overlapping attempts',async()=>{
+  let resolve,count=0;const f=fixture(()=>{count++;return new Promise(done=>resolve=done);});
+  const pending=f.controller.refresh();await f.controller.refresh();
+  assert.equal(count,1);assert.equal(f.nodes['manual-refresh'].disabled,true);
+  resolve(false);await pending;
+  assert.equal(f.nodes['manual-refresh'].disabled,false);assert.equal(f.nodes['pull-refresh-label'].textContent,'Couldn’t refresh. Try again.');
+});
+
+test('an interrupted refresh recovers the button and keeps an actionable status',async()=>{
+  const f=fixture(async()=>{throw new Error('Connection interrupted');});
+  await f.controller.refresh();
+  assert.equal(f.nodes['manual-refresh'].disabled,false);
+  assert.equal(f.nodes['pull-refresh-label'].textContent,'Couldn’t refresh. Try again.');
+});

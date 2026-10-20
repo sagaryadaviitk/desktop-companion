@@ -1,0 +1,24 @@
+// Homepage-only fallback. Attach hostname/*, with a more-specific hostname/api/*
+// route set to no Worker. The wildcard also covers /?chat=... navigation.
+// API calls, POSTs, cookies and responses are never logged, cached or replayed.
+const PAGE = __COMPANION_OFFLINE_HTML__;
+const FAILURE_STATUS = new Set([502,503,504,520,521,522,523,524,525,526,527,530]);
+export function offline(method='GET') {
+ return new Response(method==='HEAD'?null:PAGE,{status:503,headers:{
+  'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store, max-age=0',
+  'Retry-After':'15','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',
+  'Referrer-Policy':'no-referrer',
+  'Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+ }});
+}
+export default {async fetch(request) {
+ const url=new URL(request.url);
+ // workers.dev is a static preview, never a relay for the private dashboard.
+ if(url.hostname.endsWith('.workers.dev'))return offline(request.method);
+ const homepage=(request.method==='GET'||request.method==='HEAD')&&url.pathname==='/'&&(request.headers.get('Accept')||'').includes('text/html');
+ if(!homepage)return fetch(request);
+ try {
+  const response=await fetch(request,{redirect:'manual',cf:{cacheTtl:0,cacheEverything:false}});
+  return FAILURE_STATUS.has(response.status)?offline(request.method):response;
+ }catch(_){return offline(request.method);}
+}};

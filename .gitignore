@@ -1,0 +1,22 @@
+.state/
+__pycache__/
+*.py[cod]
+config.local.json
+config-*.tmp
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.zip
+*.app/
+.cloudflared/
+.wrangler/
+# Abandoned Slack setup is local history, outside the Companion source export.
+/slack-app.json
+/slack-manifest.json
+/slack-install-request.txt
