@@ -29,6 +29,23 @@
 }
 .conversation,.reading-area,.messages,#sidebar,.home-screen {background:var(--bg)}
 body {background:var(--bg);color:var(--text);letter-spacing:-.01em}
+.approvals-banner {background:var(--warning-bg)!important;color:var(--warn)!important;border-color:var(--warn)!important}
+.approval-card {padding:16px 0;border-bottom:1px solid var(--border)}
+.approval-card h3 {font-size:18px;margin:8px 0 12px;line-height:1.35}
+.approval-card>p {white-space:pre-wrap;overflow-wrap:anywhere}
+.approval-detail {margin:12px 0;background:var(--raised);border:1px solid var(--border);border-radius:12px;padding:10px 12px}
+.approval-detail summary {font-size:13px;font-weight:600;min-height:24px;color:var(--muted)}
+.approval-detail pre {white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-height:260px;overflow:auto;color:var(--text);font-size:13px;line-height:1.5;margin:8px 0 0}
+.approval-form {display:grid;gap:10px}
+.approval-form label {font-weight:600;font-size:14px}
+.approval-form textarea,.approval-form input,.approval-form select {width:100%;min-height:44px;font-size:16px;background:var(--raised);color:var(--text);border:1px solid var(--border-strong);border-radius:12px;padding:12px;box-sizing:border-box}
+.approval-actions,.approval-suggestions {display:flex;flex-wrap:wrap;gap:8px}
+.approval-actions button {min-height:44px;text-align:left;flex:1 1 140px;padding:11px 14px;white-space:normal}
+.approval-actions small {display:block;font-size:11px;line-height:1.4;font-weight:400;margin-top:5px}
+.approval-feedback,.approval-required {font-size:13px;color:var(--muted);line-height:1.5;margin:0}
+.approval-required,.danger-action {color:var(--danger)!important}
+.approval-feedback:empty {display:none}
+.approval-tag {color:var(--warn);background:var(--warning-bg);padding:3px 7px;border-radius:7px}
 button,input,textarea,select {font-family:inherit;letter-spacing:inherit}
 button,summary,a,input,textarea,select {-webkit-tap-highlight-color:var(--accent-soft)}
 button:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible,select:focus-visible,summary:focus-visible {outline-color:var(--focus)}

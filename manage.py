@@ -15,7 +15,7 @@ import zipfile
 
 from configuration import load,save,ROOT,FILENAME
 
-MODULES=('access.py','build_app.py','companion.py','computer_use.py','configuration.py',
+MODULES=('access.py','approvals.py','build_app.py','companion.py','computer_use.py','configuration.py',
          'control.py','desktop_runtime.py','inbox.py','manage.py','new_chat.py','photos.py',
          'power.py','promotions.py','questions.py','remote_access.py','runtime.py','service.py','system_status.py')
 

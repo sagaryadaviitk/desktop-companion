@@ -49,7 +49,7 @@ test('uncertain submission keeps its draft and never retries without another use
 });
 function questionFixture(count=1,fail=false){
  const doc=document();doc.getElementById('questions-dialog').open=true;const questions=Array.from({length:count},(_,i)=>({id:'q'+i,revision:'r'+i,title:'Question '+i,options:[],delivery:'unanswered'}));
- const context={document:doc,el:id=>doc.getElementById(id),note:(tag,text,cls)=>{const n=new Element(tag);n.textContent=text;n.className=cls;return n;},selected:'chat',selectedData:{questions,control:{available:true,live:{}}},connected:true,authVersion:0,csrf:'test',questionSignature:'',questionDrafts:new Map(),questionBusy:new Set(),questionErrors:new Map(),queueSteering:new Set(),queueUI:{reveal(){}},showCommandResult(){},refreshChat:async()=>{},api:async()=>{if(fail)throw Error('Unconfirmed');return {state:'steered',message:'Accepted'};}};
+ const context={document:doc,el:id=>doc.getElementById(id),note:(tag,text,cls)=>{const n=new Element(tag);n.textContent=text;n.className=cls;return n;},selected:'chat',selectedData:{questions,control:{available:true,live:{}}},renderApprovals(){},connected:true,authVersion:0,csrf:'test',questionSignature:'',questionDrafts:new Map(),questionBusy:new Set(),questionErrors:new Map(),queueSteering:new Set(),queueUI:{reveal(){}},showCommandResult(){},refreshChat:async()=>{},api:async()=>{if(fail)throw Error('Unconfirmed');return {state:'steered',message:'Accepted'};}};
  vm.runInNewContext(app.slice(app.indexOf('function renderQuestions(){'),app.indexOf("el('questions-banner').addEventListener")),context);context.renderQuestions();return {context,doc};
 }
 test('accepted final answers close the question panel; remaining questions and errors keep it open',async()=>{

@@ -25,6 +25,7 @@ from inbox import Inbox
 from runtime import AccountMonitor, SharedRuntime, RuntimeUnavailable
 from questions import pending_questions, answer_envelope, answer_identity, queued_question_answers, replies as question_replies
 from desktop_runtime import DesktopRuntime,queue_photo_message,QueueNotClaimed,change_queued_message
+from approvals import ApprovalChanged, digest as approval_digest
 from computer_use import computer_use_snapshot
 from promotions import QueuePromotions
 from photos import PhotoStore, PhotoError
@@ -35,7 +36,7 @@ from system_status import read_record
 
 ROOT = Path(__file__).resolve().parent
 STATIC_FILES={'/':('index.html','text/html'),'/style.css':('style.css','text/css'),'/theme.css':('theme.css','text/css'),
-              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation','shell')}}
+              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation','shell','approvals')}}
 def web_build():
     digest=hashlib.sha256()
     for path in sorted((ROOT/'web').glob('*')):
@@ -785,6 +786,9 @@ class Handler(BaseHTTPRequestHandler):
                         question['delivery']=attempt['state']
                 value["control"] = self.server.bridge.describe(thread_id)
                 value['control']['live']=self.server.runtime.capabilities(thread_id) if self.server.runtime and value['control']['available'] and not value['archived'] else {'steer':False,'model_selection':False,'reason':SharedRuntime.REASON}
+                for approval in value['control']['live'].get('execution',{}).get('approvals',[]):
+                    attempt=self.server.journal.lookup('approval-'+approval_digest([thread_id,approval['id'],approval['revision']]))
+                    if attempt:approval['response_state']=attempt['state'];approval['response_message']=attempt['message']
                 if value["archived"]:
                     value["control"]={"available":False,"reason":"Archived conversation. Restore it in the desktop app before queueing a follow-up."}
                 # Revalidate live controls on every read, but avoid re-sending an unchanged transcript.
@@ -907,6 +911,21 @@ class Handler(BaseHTTPRequestHandler):
                 if not accepted:
                     return self.reply(409,{'error':'This conversation has newer messages. Refresh before marking it read.'})
                 return self.reply(200,{'updated':True})
+            if self.path == '/api/approvals/respond':
+                payload=self.read_payload()
+                thread_id=payload.get('thread_id');identity=payload.get('approval_id');revision=payload.get('revision');choice=payload.get('choice');answers=payload.get('answers',{})
+                if not isinstance(thread_id,str) or not THREAD_ID.fullmatch(thread_id) or any(not isinstance(v,str) or not re.fullmatch(r'[a-f0-9]{64}',v) for v in (identity,revision)) or choice not in ('allow','session','decline','cancel','reply') or not isinstance(answers,dict):raise ValueError('Invalid approval response.')
+                if set(payload)-{'thread_id','approval_id','revision','choice','answers'}:raise ValueError('Unexpected approval fields.')
+                if not self.server.bridge.availability()['available']:return self.reply(409,{'error':'Approval responses are disabled in this viewer.'})
+                if not self.server.runtime or not hasattr(self.server.runtime,'respond_approval'):return self.reply(409,{'error':'Live approvals are disconnected. Open this chat on your Mac.'})
+                canonical={'thread_id':thread_id,'approval_id':identity,'revision':revision,'choice':choice,'answers':answers}
+                def respond():
+                    try:return self.server.runtime.respond_approval(thread_id,identity,revision,choice,answers)
+                    except ApprovalChanged as error:raise ControlError(str(error)) from error
+                    except (RuntimeUnavailable,OSError,ValueError,KeyError) as error:raise ControlError('Approval delivery is unconfirmed. Check the prompt on your Mac; this response will not be resent automatically.',uncertain=True) from error
+                try:result=self.server.journal.execute('approval-'+approval_digest([thread_id,identity,revision]),canonical,respond)
+                except ValueError:return self.reply(409,{'error':'A response was already submitted for this request. Refresh and check its status.'})
+                return self.reply(200 if result['state']=='answered' else 409,result)
             if self.path == '/api/questions/answer':
                 payload=self.read_payload()
                 thread_id=payload.get('thread_id');question_id=payload.get('question_id');revision=payload.get('revision');answer=payload.get('answer')
@@ -1088,7 +1107,7 @@ def main():
     initialize_remote_origin(settings,ROOT/'.state',load_configuration())
     inbox=Inbox(ROOT/'.state'/'inbox.sqlite')
     account=AccountMonitor()
-    runtime=DesktopRuntime(args.codex_home,history.read_thread,queue_reader=history.queue_item,receipt_reader=history.has_client_receipt,promotions=QueuePromotions(ROOT/'.state'/'promotions.sqlite'))
+    runtime=DesktopRuntime(args.codex_home,history.read_thread,queue_reader=history.queue_item,receipt_reader=history.has_client_receipt,promotions=QueuePromotions(ROOT/'.state'/'promotions.sqlite'),approval_redactor=redact)
     new_chat=NewChat(args.codex_home,PERSONAL_WORKSPACE)
     account.snapshot()
     gateway = CompanionServer(("127.0.0.1", args.remote_port), history, bridge, journal, access=access, remote=True, settings=settings, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat)

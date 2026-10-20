@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from companion import Bridge, CommandJournal, CompanionServer, ControlError, History, redact, visible_user_text, is_scheduled_input, initialize_remote_origin
 from access import RemoteSettings
+from runtime import RuntimeUnavailable
 
 
 CHAT = "test-chat-1234567890"
@@ -368,6 +369,40 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(first[0],200);self.assertEqual(second[0],200)
         self.assertEqual(json.loads(first[2])["state"],"queued")
         self.assertEqual(send.call_count,1)
+
+    def test_approval_response_requires_csrf_and_enabled_controls_and_never_falls_back_to_queue(self):
+        runtime=SimpleNamespace(respond_approval=lambda *_:{'state':'answered','message':'Accepted'})
+        payload={'thread_id':CHAT,'approval_id':'a'*64,'revision':'b'*64,'choice':'allow','answers':{}}
+        headers={'X-Companion-CSRF':self.server.csrf}
+        with patch.object(self.server,'runtime',runtime),patch.object(self.server.bridge,'send') as queue:
+            self.assertEqual(self.request('/api/approvals/respond','POST',body=json.dumps(payload))[0],403)
+            self.assertEqual(self.request('/api/approvals/respond','POST',headers,body=json.dumps(payload))[0],409)
+            queue.assert_not_called()
+
+    def test_approval_journal_deduplicates_devices_and_conflicting_choices(self):
+        from unittest.mock import Mock
+        response=Mock(return_value={'state':'answered','message':'Accepted'})
+        runtime=SimpleNamespace(respond_approval=response)
+        payload={'thread_id':CHAT,'approval_id':'c'*64,'revision':'d'*64,'choice':'allow','answers':{}}
+        headers={'X-Companion-CSRF':self.server.csrf}
+        with patch.object(self.server,'runtime',runtime),patch.object(self.server.bridge,'availability',return_value={'available':True}),patch.object(self.server.bridge,'send') as queue:
+            for _ in range(2):self.assertEqual(self.request('/api/approvals/respond','POST',headers,json.dumps(payload))[0],200)
+            self.assertEqual(self.request('/api/approvals/respond','POST',headers,json.dumps({**payload,'choice':'decline'}))[0],409)
+            response.assert_called_once_with(CHAT,'c'*64,'d'*64,'allow',{});queue.assert_not_called()
+
+    def test_uncertain_approval_is_not_replayed_and_get_exposes_locked_response_status(self):
+        from unittest.mock import Mock
+        response=Mock(side_effect=RuntimeUnavailable('Synthetic lost acknowledgement'))
+        approval={'id':'e'*64,'revision':'f'*64,'choices':[]}
+        runtime=SimpleNamespace(respond_approval=response,capabilities=lambda _:{'connected':True,'execution':{'approvals':[dict(approval)],'approval_count':1}})
+        payload={'thread_id':CHAT,'approval_id':approval['id'],'revision':approval['revision'],'choice':'decline','answers':{}}
+        with patch.object(self.server,'runtime',runtime),patch.object(self.server.bridge,'availability',return_value={'available':True}),patch.object(self.server.bridge,'describe',return_value={'available':True}):
+            for _ in range(2):
+                code,_,body=self.request('/api/approvals/respond','POST',{'X-Companion-CSRF':self.server.csrf},json.dumps(payload))
+                self.assertEqual(code,409);self.assertEqual(json.loads(body)['state'],'unknown')
+            response.assert_called_once()
+            code,_,body=self.request('/api/chat?id='+CHAT);self.assertEqual(code,200)
+            self.assertEqual(json.loads(body)['control']['live']['execution']['approvals'][0]['response_state'],'unknown')
 
     def test_confirmed_retry_recovers_receipt_even_after_turn_or_archive_state_changes(self):
         payload={'thread_id':CHAT,'message':'Accepted earlier','mode':'send','command_id':'recover-confirmed-12345'}

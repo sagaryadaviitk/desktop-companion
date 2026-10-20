@@ -16,7 +16,8 @@ concurrency:
 jobs:
   test:
     name: macOS / Python ${{ matrix.python }}
-    runs-on: macos-latest
+    # ARM hosted jobs exhausted their runner acquisition attempts; keep real macOS checks.
+    runs-on: macos-15-intel
     timeout-minutes: 15
     strategy:
       fail-fast: false
