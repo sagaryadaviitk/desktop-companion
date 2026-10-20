@@ -1,13 +1,21 @@
 "use strict";
-// Refresh data in place. Home Screen apps also own header pulls because no browser refresh UI is present.
-window.CompanionRefresh={install({refresh,isMobile,isStandalone=()=>window.CompanionShell?.standalone()===true,haptic=kind=>window.CompanionShell?.haptic(kind)}){
+// Panels refresh data; Home Screen headers request a guarded full-page reload.
+window.CompanionRefresh={install({refresh,reload=()=>false,isMobile,isStandalone=()=>window.CompanionShell?.standalone()===true,haptic=kind=>window.CompanionShell?.haptic(kind)}){
 const el=id=>document.getElementById(id);
 let manualRefreshing=false,pullGesture=null,pullTimer=null,pullAnchor=null;
 function cancelPull(){pullGesture=null;if(!manualRefreshing){el('pull-refresh').hidden=true;pullAnchor=null;}}
 function showPullRefresh(label,loading=false){
   clearTimeout(pullTimer);const indicator=el('pull-refresh');indicator.hidden=false;
   document.documentElement.style.setProperty('--pull-top',(pullAnchor?.top??document.querySelector('.topbar').getBoundingClientRect().bottom)+'px');
-  el('pull-refresh-label').textContent=label;indicator.classList.toggle('loading',loading);indicator.querySelector('.pull-refresh-icon').textContent=loading?'↻':label==='Release to refresh'?'↻':label==='Up to date'?'✓':'↓';
+  el('pull-refresh-label').textContent=label;indicator.classList.toggle('loading',loading);indicator.querySelector('.pull-refresh-icon').textContent=loading||label.startsWith('Release to ')?'↻':label==='Up to date'?'✓':'↓';
+}
+function fullReload(){
+  try{
+    // The update controller owns both draft confirmation and in-flight guards.
+    // A denied/cancelled reload must never fall back to a soft refresh.
+    if(reload()!==true){cancelPull();return false;}
+    manualRefreshing=true;el('manual-refresh').disabled=true;el('manual-refresh').setAttribute('aria-busy','true');showPullRefresh('Reloading app…',true);return true;
+  }catch(_){showPullRefresh('Couldn’t reload. Use ↻ or Reload app.');pullTimer=setTimeout(()=>{el('pull-refresh').hidden=true;},4000);return false;}
 }
 async function manualRefresh(fromPull=false){
   if(manualRefreshing||document.body.classList.contains('signed-out'))return;
@@ -23,8 +31,8 @@ async function manualRefresh(fromPull=false){
   finally{manualRefreshing=false;el('manual-refresh').disabled=false;el('manual-refresh').setAttribute('aria-busy','false');}
 }
 el('manual-refresh').addEventListener('click',()=>{pullAnchor=null;return manualRefresh();});
-// The app scrolls within panels to fit above a phone keyboard. Its pull gesture
-// refreshes data without reloading the document or discarding drafts/attachments.
+// Inner panels keep their data-only refresh. A standalone header substitutes
+// for browser chrome and reloads the document through the shared reload guard.
 document.addEventListener('touchstart',event=>{
   cancelPull();
   if(!isMobile()||manualRefreshing||event.touches.length!==1||document.querySelector('dialog[open]')||document.body.classList.contains('keyboard-open')||!document.body.classList.contains('ready'))return;
@@ -32,7 +40,7 @@ document.addEventListener('touchstart',event=>{
   const panel=target.closest('#chats,#messages,#home-screen,#activity-panel,#changes-panel,#details-panel');
   const header=isStandalone()&&target.closest('.topbar,.conversation-heading,.conversation-tabs,.inbox-tabs,.browse-toolbar');
   if((!panel&&!header)||(panel&&panel.scrollTop>1))return;
-  const touch=event.touches[0];pullGesture={panel,x:touch.clientX,y:touch.clientY,distance:0,active:false,armed:false};
+  const touch=event.touches[0];pullGesture={panel,reload:Boolean(header),x:touch.clientX,y:touch.clientY,distance:0,active:false,armed:false};
   pullAnchor=header?{top:document.querySelector('.topbar').getBoundingClientRect().bottom}:panel.getBoundingClientRect();
 },{passive:true});
 document.addEventListener('touchmove',event=>{
@@ -44,12 +52,12 @@ document.addEventListener('touchmove',event=>{
   if(!event.cancelable){cancelPull();return;}
   event.preventDefault();pullGesture.active=true;pullGesture.distance=Math.max(0,dy);
   if(dy>=80&&!pullGesture.armed){pullGesture.armed=true;haptic('armed');}
-  showPullRefresh(dy>=80?'Release to refresh':'Pull to refresh');
+  showPullRefresh(pullGesture.reload?(dy>=80?'Release to reload app':'Pull to reload app'):(dy>=80?'Release to refresh':'Pull to refresh'));
 },{passive:false});
 document.addEventListener('touchend',event=>{
   const gesture=pullGesture;pullGesture=null;if(!gesture?.active)return;
   if(event.cancelable)event.preventDefault(); // The gesture must not also open a chat card.
-  if(gesture.distance>=80)return manualRefresh(true);else el('pull-refresh').hidden=true;
+  if(gesture.distance>=80)return gesture.reload?fullReload():manualRefresh(true);else el('pull-refresh').hidden=true;
 },{passive:false});
 document.addEventListener('touchcancel',cancelPull,{passive:true});
 
