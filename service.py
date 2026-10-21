@@ -3,6 +3,7 @@
 
 import argparse
 import fcntl
+import errno
 import hashlib
 import json
 import os
@@ -17,15 +18,28 @@ import threading
 import time
 from urllib.request import urlopen
 
-from power import AWAKE_COMMAND
-from configuration import load
-from system_status import publish,read_record,record_event
+# A missing/quarantined dependency needs operator repair, not a login restart loop.
+try:
+    from power import AWAKE_COMMAND
+    from configuration import load
+    from system_status import publish,read_record,record_event
+except (ImportError,OSError,SyntaxError):
+    if __name__ == '__main__' and sys.argv[1:] == ['run']:
+        print('Companion dependencies are unavailable. Automatic startup stopped; review security status and repair the approved installation.',file=sys.stderr,flush=True)
+        raise SystemExit(0)
+    raise
 
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / ".state"
 LABEL = "me.sagaryadav.desktop-companion"
-CONFIG = load(ROOT)
+try:
+    CONFIG = load(ROOT)
+except (OSError,ValueError):
+    if __name__ == '__main__' and sys.argv[1:] == ['run']:
+        print('Companion configuration is unavailable. Automatic startup stopped; review the installation before restarting.',file=sys.stderr,flush=True)
+        raise SystemExit(0)
+    raise
 HOSTNAME = CONFIG.hostname
 TUNNEL_ID = CONFIG.tunnel_id
 PLIST = Path.home() / "Library" / "LaunchAgents" / (LABEL + ".plist")
@@ -39,20 +53,25 @@ def definition(root=ROOT, python=sys.executable, home=None, codex=None):
         raise RuntimeError("The installed codex command is unavailable.")
     return {
         "Label": LABEL,
-        "ProgramArguments": [str(python), "-u", str(root / "service.py"), "run"],
-        "WorkingDirectory": str(root),
+        # Positional shell arguments preserve spaces without interpreting paths as code.
+        # Exit zero only for a missing runtime so launchd does not retry that condition.
+        "ProgramArguments": ["/bin/sh", "-c",
+            'if [ ! -r "$1" ] || [ ! -x "$2" ]; then echo "Companion runtime unavailable; approved repair required. Automatic startup stopped." >&2; exit 0; fi; exec "$2" -u "$1" run',
+            "desktop-companion-service", str(root / "service.py"), str(python)],
+        "WorkingDirectory": str(home),
         "EnvironmentVariables": {
             "HOME": str(home),
             "PATH": str(Path(codex).parent) + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "PYTHONUNBUFFERED": "1",
         },
-        "KeepAlive": True,
-        "ThrottleInterval": 15,
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 60,
         "ExitTimeOut": 20,
         "AbandonProcessGroup": False,
         "Umask": 0o077,
-        "StandardOutPath": str(root / ".state" / "service.log"),
-        "StandardErrorPath": str(root / ".state" / "service-error.log"),
+        "StandardOutPath": str(home / "Library" / "Logs" / "Desktop Companion" / "service.log"),
+        "StandardErrorPath": str(home / "Library" / "Logs" / "Desktop Companion" / "service-error.log"),
     }
 
 
@@ -91,16 +110,6 @@ def desktop_app_running():
     return result.returncode == 0 and str(app/'Contents/MacOS'/executable) in {line.strip() for line in (result.stdout or "").splitlines()}
 
 
-def ensure_desktop_app():
-    if desktop_app_running():
-        return
-    app = CONFIG.app_path()
-    if not app.is_dir():
-        return
-    result = subprocess.run(["/usr/bin/open","-g","-j",str(app)],capture_output=True,timeout=10)
-    print("Opened the desktop app." if result.returncode == 0 else "The desktop app could not be opened automatically.",flush=True)
-
-
 def start_tunnel():
     return subprocess.Popen([sys.executable,'-u',str(ROOT/'remote_access.py'),'start','--hostname',HOSTNAME,'--tunnel-id',TUNNEL_ID],cwd=ROOT)
 
@@ -109,42 +118,110 @@ def start_server():
     return subprocess.Popen([sys.executable,'-u',str(ROOT/'companion.py')],cwd=ROOT)
 
 
-def recover_server(children,retry_at,now,restart=False):
-    process=children.get('server')
+class RecoveryBudget:
+    """Bound rapid local failures; network retries inside cloudflared remain separate."""
+    def __init__(self,initial_delay=3,max_delay=60,max_failures=5):
+        self.initial_delay=initial_delay;self.max_delay=max_delay;self.max_failures=max_failures
+        self.reset()
+
+    def reset(self):
+        self.failures=0;self.started_at=None;self.blocked=False
+
+    def started(self,now):
+        self.started_at=now
+
+    def failed(self,now,exit_code=None):
+        if self.started_at is not None and now-self.started_at>=60:
+            self.failures=0
+        self.started_at=None;self.failures+=1
+        self.blocked=exit_code in (2,78) or self.max_failures is not None and self.failures>=self.max_failures
+        return float('inf') if self.blocked else now+min(self.max_delay,self.initial_delay*2**min(self.failures-1,16))
+
+
+def recovery_notice(name,budget,retry_at,now):
+    if budget.blocked:
+        print(f'{name} recovery paused. Review runtime/security status and repair the cause before an explicit restart. Other components remain running.',flush=True)
+    else:
+        print(f'{name} stopped. Retrying in {int(retry_at-now)} seconds; other components remain running.',flush=True)
+
+
+def recover_process(children,name,starter,retry_at,now,budget,restart=False):
+    process=children.get(name)
     if restart:
-        if process and process.poll() is None:stop_children({'server':process})
-        children.pop('server',None);process=None;retry_at=now
-    if process and process.poll() is not None:
-        process.wait();children.pop('server');process=None;retry_at=now+3
-        print('Desktop service stopped. Recovering it without interrupting the tunnel or awake guard.',flush=True)
-    if not process and now>=retry_at:
-        children['server']=start_server();write_runtime(children)
+        if process and process.poll() is None:stop_children({name:process})
+        elif process:process.wait()
+        children.pop(name,None);process=None;retry_at=now;budget.reset()
+        write_runtime(children)
+    if process:
+        exit_code=process.poll()
+        if exit_code is not None:
+            process.wait();children.pop(name);process=None
+            retry_at=budget.failed(now,exit_code)
+            write_runtime(children);recovery_notice(name,budget,retry_at,now)
+    if not process and not budget.blocked and now>=retry_at:
+        try:
+            children[name]=starter()
+        except OSError as error:
+            repair_code=78 if error.errno in (errno.ENOENT,errno.ENOTDIR,errno.EACCES,errno.ENOEXEC) else None
+            retry_at=budget.failed(now,repair_code)
+            recovery_notice(name,budget,retry_at,now)
+        else:
+            budget.started(now)
+        write_runtime(children)
     return retry_at
 
 
-def recover_tunnel(children,retry_at,now,reconnect=False,reason='network_changed'):
+def recover_server(children,retry_at,now,restart=False,budget=None):
+    return recover_process(children,'server',start_server,retry_at,now,
+                           budget if budget is not None else RecoveryBudget(),restart)
+
+
+def start_awake():
+    return subprocess.Popen(AWAKE_COMMAND)
+
+
+def recover_awake(children,retry_at,now,budget):
+    return recover_process(children,'awake',start_awake,retry_at,now,budget)
+
+
+def recover_tunnel(children,retry_at,now,reconnect=False,reason='network_changed',budget=None):
+    budget=budget if budget is not None else RecoveryBudget(initial_delay=30,max_delay=300,max_failures=None)
     process=children.get('tunnel')
     if reconnect and reason=='network_changed' and process and process.poll() is None:
-        # Interface metadata changes do not prove a broken path. cloudflared owns
-        # reconnection for a live connector; never discard its established edges.
         record_event(STATE,'network_change_preserved',supervisor_pid=os.getpid(),controller_pid=process.pid,reason=reason)
         return retry_at
-    if reconnect:
+    if reconnect and reason=='manual_restart':budget.reset()
+    if reconnect and not budget.blocked:
         record_event(STATE,'reconnect_requested',supervisor_pid=os.getpid(),reason=reason)
         if process and process.poll() is None:stop_children({'tunnel':process})
+        elif process:process.wait()
         children.pop('tunnel',None);process=None;retry_at=now+3
         previous=read_record(STATE)
         publish(STATE,'retrying',retry_at=time.time()+3,reason=reason,**{key:previous[key] for key in ('last_ready_at','transport') if key in previous})
         write_runtime(children)
-    if process and process.poll() is not None:
-        record_event(STATE,'controller_exited',supervisor_pid=os.getpid(),controller_pid=process.pid,exit_code=process.returncode)
-        process.wait();children.pop('tunnel');write_runtime(children)
+    exit_code=process.poll() if process else None
+    if process and exit_code is not None:
+        record_event(STATE,'controller_exited',supervisor_pid=os.getpid(),controller_pid=process.pid,exit_code=exit_code)
+        process.wait();children.pop('tunnel');process=None;write_runtime(children)
+        retry_at=budget.failed(now,exit_code)
         previous=read_record(STATE)
-        publish(STATE,'retrying',retry_at=time.time()+30,reason=previous.get('reason','connector_exited'),**{key:previous[key] for key in ('last_ready_at','transport','public_http_status','connections') if key in previous})
-        print('Phone tunnel disconnected. Retrying in 30 seconds; local Companion stays available.',flush=True)
-        return now+30
-    if not process and now>=retry_at:
-        children['tunnel']=start_tunnel();write_runtime(children)
+        publish(STATE,'failed' if budget.blocked else 'retrying',
+                **({} if budget.blocked else {'retry_at':time.time()+retry_at-now}),
+                reason='controller_repair_required' if budget.blocked else previous.get('reason','connector_exited'),
+                **{key:previous[key] for key in ('last_ready_at','transport','public_http_status','connections') if key in previous})
+        recovery_notice('tunnel',budget,retry_at,now)
+    if not process and not budget.blocked and now>=retry_at:
+        try:
+            children['tunnel']=start_tunnel()
+        except OSError as error:
+            repair_code=78 if error.errno in (errno.ENOENT,errno.ENOTDIR,errno.EACCES,errno.ENOEXEC) else None
+            retry_at=budget.failed(now,repair_code)
+            publish(STATE,'failed' if budget.blocked else 'retrying',
+                    **({} if budget.blocked else {'retry_at':time.time()+retry_at-now}),
+                    reason='controller_repair_required' if budget.blocked else 'startup_failed')
+            recovery_notice('tunnel',budget,retry_at,now)
+        else:budget.started(now)
+        write_runtime(children)
     return retry_at
 
 
@@ -232,34 +309,28 @@ def supervise():
                 stopping.wait(0.5)
             if stopping.is_set():
                 return
-            children["awake"] = subprocess.Popen(AWAKE_COMMAND)
+            now=time.monotonic()
+            server_budget=RecoveryBudget();server_budget.started(now)
+            awake_budget=RecoveryBudget()
+            tunnel_budget=RecoveryBudget(initial_delay=30,max_delay=300,max_failures=None)
+            awake_retry_at=recover_awake(children,0,now,awake_budget)
+            tunnel_retry_at=0
             if CONFIG.remote_enabled:
-                children["tunnel"] = start_tunnel()
+                tunnel_retry_at=recover_tunnel(children,0,now,budget=tunnel_budget)
             write_runtime(children)
             record_event(STATE,'supervisor_started',supervisor_pid=os.getpid())
-            print("Supervised companion and battery/adapter idle-sleep prevention started. Phone access: "+('configured' if CONFIG.remote_enabled else 'local only'),flush=True)
-            next_app_check = 0
-            tunnel_retry_at=0
+            print("Companion supervision started. Check component status for readiness. Phone access: "+('configured' if CONFIG.remote_enabled else 'local only'),flush=True)
             server_retry_at=0
             network=NetworkRecovery();next_network_check=0
             while not stopping.wait(1):
                 now=time.monotonic();reconnect=False
-                server_retry_at=recover_server(children,server_retry_at,now,restart=consume_web_restart())
+                server_retry_at=recover_server(children,server_retry_at,now,restart=consume_web_restart(),budget=server_budget)
+                awake_retry_at=recover_awake(children,awake_retry_at,now,awake_budget)
                 if now>=next_network_check:
                     reconnect=network.observe(network_state(),now);next_network_check=now+5
                 if CONFIG.remote_enabled:
                     requested=consume_tunnel_restart()
-                    tunnel_retry_at=recover_tunnel(children,tunnel_retry_at,now,reconnect=requested or reconnect,reason='manual_restart' if requested else 'network_changed')
-                for name,process in children.items():
-                    if name in ('tunnel','server'):continue
-                    if process.poll() is not None:
-                        raise RuntimeError(f"The {name} process exited; restarting the companion group.")
-                if time.monotonic() >= next_app_check:
-                    try:
-                        ensure_desktop_app()
-                    except (OSError,subprocess.TimeoutExpired):
-                        print("The desktop app launch check is temporarily unavailable.",flush=True)
-                    next_app_check = time.monotonic()+15
+                    tunnel_retry_at=recover_tunnel(children,tunnel_retry_at,now,reconnect=requested or reconnect,reason='manual_restart' if requested else 'network_changed',budget=tunnel_budget)
         finally:
             stop_children(children)
             runtime = STATE / "service-runtime.json"
@@ -274,24 +345,34 @@ def launchctl(*args,check=True):
     return result
 
 
-def install():
-    STATE.mkdir(mode=0o700,exist_ok=True)
-    PLIST.parent.mkdir(parents=True,exist_ok=True)
+def install(*,background_install_approved=False):
+    if not background_install_approved:
+        raise RuntimeError('Background installation is explicit. Review SETUP.md and security requirements, then use install --background-install-approved on an approved machine.')
     if PLIST.exists():
         previous = plistlib.loads(PLIST.read_bytes())
         if str(ROOT / "service.py") not in previous.get("ProgramArguments",[]):
             raise RuntimeError("An unrelated LaunchAgent already uses this label; leaving it untouched.")
-    for filename in ("service.log","service-error.log"):
-        path = STATE / filename
-        path.touch(exist_ok=True)
-        path.chmod(0o600)
+    # Validate before stopping an existing service or writing files.
+    value=definition()
+    STATE.mkdir(mode=0o700,exist_ok=True)
+    PLIST.parent.mkdir(parents=True,exist_ok=True)
+    log_directory=Path(value['StandardOutPath']).parent
+    log_paths=[Path(value[key]) for key in ('StandardOutPath','StandardErrorPath')]
+    if log_directory.is_symlink() or any(path.is_symlink() for path in log_paths):
+        raise RuntimeError('The service log location is a symlink; installation stopped.')
+    log_directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+    log_directory.chmod(0o700)
+    for path in log_paths:
+        descriptor=os.open(path,os.O_CREAT|os.O_APPEND|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+        try:os.fchmod(descriptor,0o600)
+        finally:os.close(descriptor)
     if launchctl("print",TARGET,check=False).returncode == 0:
         launchctl("bootout",TARGET)
-    PLIST.write_bytes(plistlib.dumps(definition()))
+    PLIST.write_bytes(plistlib.dumps(value))
     PLIST.chmod(0o600)
     launchctl("enable",TARGET)
     launchctl("bootstrap",f"gui/{os.getuid()}",str(PLIST))
-    print("Installed. Starts at user login and restarts automatically after an exit.")
+    print("Installed. Starts at login with isolated, bounded recovery. ChatGPT is opened only by the user.")
 
 
 def status():
@@ -317,11 +398,14 @@ def status():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action",choices=["install","run","restart","restart-web","status","stop","uninstall"])
-    action = parser.parse_args().action
+    parser.add_argument("--background-install-approved",action="store_true",help="Explicitly opt in to login startup after reviewing machine security requirements")
+    args = parser.parse_args()
+    if args.background_install_approved and args.action != "install":parser.error("--background-install-approved is only valid with install")
+    action = args.action
     if action == "run":
         supervise()
     elif action == "install":
-        install()
+        install(background_install_approved=args.background_install_approved)
     elif action == 'restart-web':
         if launchctl('print',TARGET,check=False).returncode:raise RuntimeError('Start the background service first.')
         request_web_restart()
@@ -350,4 +434,7 @@ if __name__ == "__main__":
         main()
     except (OSError,ValueError,RuntimeError) as error:
         print(str(error),file=sys.stderr,flush=True)
+        if sys.argv[1:] == ['run']:
+            print('Automatic startup stopped. Repair the approved installation before restarting; no automatic reinstall is attempted.',file=sys.stderr,flush=True)
+            raise SystemExit(0)
         raise SystemExit(1)

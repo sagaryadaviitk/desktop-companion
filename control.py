@@ -133,11 +133,7 @@ def perform(action,identifier=None,root=ROOT):
                 service.launchctl("enable",service.TARGET)
                 service.launchctl("bootstrap",f"gui/{os.getuid()}",str(service.PLIST))
             else:
-                # Keep stdout a single JSON response for the native client.
-                import contextlib
-                import io
-                with contextlib.redirect_stdout(io.StringIO()):
-                    service.install()
+                return {"ok":False,"message":"Background service is not installed. Review SETUP.md and explicitly enable approved login startup; this button does not install it."}
         else:
             service.launchctl("kickstart","-k",service.TARGET)
         return {"ok":True,"message":"Starting your system. The connection will recover automatically."}
