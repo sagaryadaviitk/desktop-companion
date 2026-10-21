@@ -164,9 +164,9 @@ class GatewayTests(unittest.TestCase):
 
     def test_anonymous_reads_and_commands_never_reach_history_or_bridge(self):
         with patch.object(self.history,"list_threads") as read, patch.object(self.remote.bridge,"send") as send, patch("companion.cached_power_state") as power_read:
-            for path in ["/api/chats","/api/chat?id="+CHAT,"/api/status","/api/ready","/api/control/status","/api/components","/api/devices","/api/photos/"+'a'*32]:
+            for path in ["/api/chats","/api/chat?id="+CHAT,"/api/status","/api/ready","/api/control/status","/api/components","/api/devices","/api/photos/"+'a'*32,'/api/local/status','/api/local/chats','/api/local/chat?id=local-fixture']:
                 self.assertEqual(self.request(path)[0],401)
-            for path in ['/api/command','/api/read-state','/api/model','/api/questions/answer','/api/queue/steer','/api/queue/recovery/dismiss','/api/photos','/api/photos/remove']:
+            for path in ['/api/command','/api/read-state','/api/model','/api/questions/answer','/api/queue/steer','/api/queue/recovery/dismiss','/api/photos','/api/photos/remove','/api/local/chats','/api/local/message','/api/local/archive']:
                 self.assertEqual(self.request(path,"POST",{"thread_id":CHAT,"message":"hello"})[0],401)
         read.assert_not_called();send.assert_not_called();power_read.assert_not_called()
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local desktop chat viewer. Never starts an agent or edits Codex databases."""
+"""Desktop chat bridge and isolated opt-in local assistant; native history stays read-only."""
 
 import argparse
 from contextlib import closing, contextmanager
@@ -35,10 +35,13 @@ from new_chat import NewChat,PERSONAL_WORKSPACE,prompt_title
 from configuration import load as load_configuration
 from system_status import read_record
 from media import MediaStore, byte_range
+from local_assistant import LocalAssistant, LocalError
+from local_settings import LocalSettings
 
 
 ROOT = Path(__file__).resolve().parent
 STATIC_FILES={'/':('index.html','text/html'),'/style.css':('style.css','text/css'),'/theme.css':('theme.css','text/css'),
+              '/local':('local.html','text/html'),'/local/':('local.html','text/html'),'/local.css':('local.css','text/css'),'/local.js':('local.js','text/javascript'),
               '/media':('media.html','text/html'),'/media/':('media.html','text/html'),'/media.css':('media.css','text/css'),
               **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation','shell','approvals','media')}}
 def web_build():
@@ -581,7 +584,7 @@ class CompanionServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 32
 
-    def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None,read_cache=None):
+    def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None,read_cache=None,local_assistant=None,local_error=None):
         if remote and (access is None or settings is None):
             raise ValueError("The remote gateway requires authentication and explicit origin settings.")
         self.history = history
@@ -600,6 +603,8 @@ class CompanionServer(ThreadingHTTPServer):
         self.photos=photos
         self.new_chat=new_chat
         self.media=media or MediaStore(journal.path.parent/'media')
+        self.local_assistant=local_assistant
+        self.local_error=local_error or 'Local chats are unavailable in this read-only viewer.'
         self.slots = threading.BoundedSemaphore(32)
         super().__init__(address, Handler)
 
@@ -792,13 +797,26 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path in static:
                 filename, mime = static[parsed.path]
                 data=(ROOT/'web'/filename).read_bytes()
-                if filename in ('index.html','media.html'):data=data.replace(b'__BUILD__',web_build().encode())
+                if filename in ('index.html','media.html','local.html'):data=data.replace(b'__BUILD__',web_build().encode())
                 return self.reply(200,data,mime)
             session = self.session()
             if parsed.path == "/api/auth/status":
                 return self.reply(200, {"remote": self.server.remote, "authenticated": bool(session) if self.server.remote else True})
             if self.server.remote and not session:
                 return self.reply(401, {"error": "Pair this browser before viewing conversations.", "auth_required": True})
+            if parsed.path.startswith('/api/local/'):
+                assistant=self.server.local_assistant
+                if parsed.path=='/api/local/status':
+                    return self.reply(200,assistant.status() if assistant else {'enabled':False,'ready':False,'models':[],'skills':[],'api_profiles':[],'workspaces':[],'busy':False,'error':self.server.local_error})
+                if not assistant:
+                    if parsed.path=='/api/local/chats':return self.reply(200,{'chats':[]})
+                    return self.reply(409,{'error':self.server.local_error})
+                if parsed.path=='/api/local/chats':return self.reply(200,assistant.chats())
+                if parsed.path=='/api/local/chat':
+                    identities=parse_qs(parsed.query).get('id',[])
+                    if len(identities)!=1:raise LocalError('Choose one local chat.')
+                    return self.reply(200,assistant.detail(identities[0]))
+                return self.reply(404,{'error':'Unknown local route.'})
             if parsed.path == '/api/media':
                 return self.reply(200, {'items': self.server.media.catalog()})
             if parsed.path.startswith('/api/media/'):
@@ -890,6 +908,8 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get('If-None-Match')==revision:return self.reply(304,b'',"text/plain",extra_headers=headers)
                 return self.reply(200, value,extra_headers=headers)
             return self.reply(404, {"error": "Not found."})
+        except LocalError as error:
+            return self.reply(400,{'error':str(error)})
         except KeyError:
             return self.reply(404, {"error": "Chat not found."})
         except (ValueError,TypeError):
@@ -920,6 +940,13 @@ class Handler(BaseHTTPRequestHandler):
             client_build=self.headers.get('X-Companion-UI')
             if client_build and client_build!=web_build():
                 return self.reply(409,{'error':'Companion was updated. Reload this tab before sending. Your instruction has not been submitted.','update_required':True})
+            if self.path.startswith('/api/local/'):
+                if not self.server.local_assistant:return self.reply(409,{'error':'Local chats are unavailable in this viewer.'})
+                payload=self.read_payload()
+                if self.path=='/api/local/chats':return self.reply(200,self.server.local_assistant.create(payload))
+                if self.path=='/api/local/message':return self.reply(202,self.server.local_assistant.send(payload))
+                if self.path=='/api/local/archive':return self.reply(200,self.server.local_assistant.archive(payload))
+                return self.reply(404,{'error':'Unknown local route.'})
             if self.path=='/api/chat/connect':
                 payload=self.read_payload();thread=self.server.history.read_thread(payload['thread_id'])
                 if thread['archived'] or not self.server.new_chat or not self.server.bridge.availability()['available']:
@@ -1183,6 +1210,8 @@ class Handler(BaseHTTPRequestHandler):
                     return original_action()
             result = self.server.journal.execute(command_id, payload, action)
             return self.reply(200 if result["state"] in ("queued","steered","sent") else 409, result)
+        except LocalError as error:
+            return self.reply(400,{'error':str(error)})
         except PhotoError as error:
             return self.reply(400,{'error':str(error)})
         except KeyError:
@@ -1216,8 +1245,15 @@ def main():
     new_chat=NewChat(args.codex_home,PERSONAL_WORKSPACE)
     account.snapshot()
     reads = ReadCache()
-    gateway = CompanionServer(("127.0.0.1", args.remote_port), history, bridge, journal, access=access, remote=True, settings=settings, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat,read_cache=reads)
-    server = CompanionServer(("127.0.0.1", args.port), history, bridge, journal, access=access, settings=settings, gateway_port=gateway.server_port, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat,read_cache=reads)
+    local=None;local_error='Local chats are unavailable in this read-only viewer.'
+    if not args.read_only and bridge.home==bridge.active_home:
+        try:
+            if LocalSettings(ROOT).load()['enabled']:local=LocalAssistant(ROOT,redact=redact)
+            else:local_error='Local assistant is disabled. Follow LOCAL_ASSISTANT.md to enable it on this Mac.'
+        except (ValueError,TypeError,AttributeError,OSError,sqlite3.Error):
+            local_error='Local assistant settings or storage need repair on this Mac. Existing desktop chats remain available.'
+    gateway = CompanionServer(("127.0.0.1", args.remote_port), history, bridge, journal, access=access, remote=True, settings=settings, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat,read_cache=reads,local_assistant=local,local_error=local_error)
+    server = CompanionServer(("127.0.0.1", args.port), history, bridge, journal, access=access, settings=settings, gateway_port=gateway.server_port, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat,read_cache=reads,local_assistant=local,local_error=local_error)
     worker = threading.Thread(target=gateway.serve_forever, daemon=True)
     worker.start()
     print(f"Desktop Companion: http://127.0.0.1:{server.server_port}", flush=True)
@@ -1227,6 +1263,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if local:local.close()
         server.server_close()
         gateway.shutdown()
         gateway.server_close()

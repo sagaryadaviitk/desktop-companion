@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+  <meta name="companion-build" content="__BUILD__">
+  <meta name="theme-color" content="#f5f5f7">
+  <meta name="color-scheme" content="light dark">
+  <title>Local assistant · Desktop Companion</title>
+  <script src="/appearance.js?v=__BUILD__"></script>
+  <link rel="stylesheet" href="/theme.css?v=__BUILD__">
+  <link rel="stylesheet" href="/local.css?v=__BUILD__">
+  <script src="/markdown.js?v=__BUILD__" defer></script>
+  <script src="/local.js?v=__BUILD__" defer></script>
+</head>
+<body id="local-app">
+  <header class="local-header">
+    <div class="local-heading"><span class="local-badge">LOCAL</span><div><h1>Local assistant</h1><p>Runs on your Mac through EXO.</p></div></div>
+    <a class="local-back" href="/">Desktop chats <span aria-hidden="true">↗</span></a>
+  </header>
+  <div class="local-connection"><span id="local-connection">Connecting to your Mac…</span><button id="local-refresh" type="button">Refresh</button></div>
+  <section id="local-notice" class="local-notice" role="status" hidden><p id="local-notice-text"></p><a id="local-pair" href="/" hidden>Open Companion to pair this browser</a></section>
+  <section id="local-uncertain" class="local-notice local-warning" role="status" hidden><p id="local-uncertain-text"></p><div class="local-actions"><button id="local-check-request" type="button">Check latest chats</button><button id="local-dismiss-request" type="button">I’ve checked the result</button></div></section>
+  <main id="local-workspace" class="local-layout" hidden>
+    <aside class="local-sidebar" aria-label="Local chats and settings">
+      <div class="local-section-heading"><h2>Your local chats</h2><button id="local-new" type="button">＋ New chat</button></div>
+      <details id="local-new-panel" class="local-new-panel" open>
+        <summary>Start a local chat</summary>
+        <form id="local-create-form">
+          <label for="local-model">Model</label><select id="local-model" required disabled><option value="">Checking models…</option></select>
+          <label for="local-title-input">Chat name <span class="local-muted">(optional)</span></label><input id="local-title-input" maxlength="120" autocomplete="off" placeholder="A question or a task">
+          <label for="local-workspace-choice">Workspace</label><select id="local-workspace-choice"><option value="">No workspace</option></select>
+          <fieldset id="local-skills"><legend>Skills <span class="local-muted">· choose up to 3</span></legend><p class="local-muted">Checking saved skills…</p></fieldset>
+          <p id="local-skill-feedback" class="local-help" aria-live="polite"></p>
+          <button id="local-create" class="local-primary" type="submit" disabled>Create local chat</button>
+          <p id="local-create-result" class="local-help" role="status"></p>
+        </form>
+      </details>
+      <details class="local-history" open><summary>Recent chats <span id="local-chat-count">0</span></summary><nav id="local-chats" aria-label="Recent local chats"></nav></details>
+      <details class="local-tools"><summary>Available API tools</summary><p class="local-help">Requests run from this Mac using its saved connections.</p><div id="local-api-profiles"></div></details>
+      <details class="local-appearance"><summary>Appearance</summary><div class="local-actions" role="group" aria-label="Appearance"><button type="button" data-theme-choice="light">Light</button><button type="button" data-theme-choice="dark">Dark</button><button type="button" data-theme-choice="system">System</button></div></details>
+    </aside>
+    <section class="local-conversation" aria-label="Local conversation">
+      <div class="local-conversation-heading"><div><span class="local-eyebrow">LOCAL CONVERSATION</span><h2 id="local-chat-title">Start a local chat</h2><p id="local-chat-detail" class="local-help">Choose a model and any skills you need.</p></div><button id="local-archive" type="button" disabled>Archive</button></div>
+      <div id="local-messages" class="local-messages" aria-label="Conversation messages"><p class="local-empty">Your local conversations will appear here.</p></div>
+      <p id="local-working" class="local-working" role="status" hidden>Working on your Mac…</p>
+      <div class="local-composer"><form id="local-message-form"><label for="local-message" class="local-sr-only">Message the local assistant</label><textarea id="local-message" rows="3" maxlength="8000" placeholder="Ask your local assistant…" aria-describedby="local-composer-help" disabled></textarea><button id="local-send" class="local-primary" type="submit" disabled>Send</button></form><p id="local-composer-help" class="local-help">Text only. Select a local chat to begin.</p><p id="local-send-result" class="local-help" role="status"></p></div>
+    </section>
+  </main>
+</body>
+</html>
