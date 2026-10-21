@@ -35,6 +35,28 @@ test('reopening follows the latest message through delayed image/layout growth w
  s.open();flush();assert.equal(panel.scrollTop,1800);
 });
 
+test('read failures back off exponentially with bounded jitter and recover to the active cadence',async()=>{
+ let callback,fail=true;const waits=[];
+ const p=ui.poll({read:async()=>!fail,enabled:()=>true,delay:()=>750,random:()=>0,setTimer:(fn,ms)=>{callback=fn;waits.push(ms);return waits.length;},clearTimer:()=>{}});
+ for(let i=0;i<9;i++)await callback();
+ assert.deepEqual(waits.slice(1,6),[500,1000,2000,4000,8000]);assert.equal(waits.at(-1),15000);
+ fail=false;await callback();assert.equal(waits.at(-1),750);p.stop();
+});
+
+test('wakeups coalesce during a read and paused/offline views create no timer after completion',async()=>{
+ let callback,resolve,reads=0;const waits=[];
+ const p=ui.poll({read:()=>{reads++;return new Promise(r=>resolve=r);},enabled:()=>true,delay:()=>1000,setTimer:(fn,ms)=>{callback=fn;waits.push(ms);return waits.length;},clearTimer:()=>{}});
+ const first=callback();p.wake();p.wake();assert.equal(reads,1);resolve(true);await first;assert.equal(waits.at(-1),0);
+ const second=callback();p.pause();const count=waits.length;resolve(true);await second;assert.equal(waits.length,count);
+ p.wake();assert.equal(waits.at(-1),0);p.stop();
+});
+
+test('server Retry-After is a minimum delay even when a view is explicitly resumed',async()=>{
+ let callback;const waits=[];
+ const p=ui.poll({read:async()=>false,enabled:()=>true,delay:()=>750,retryAfter:()=>20000,random:()=>1,setTimer:(fn,ms)=>{callback=fn;waits.push(ms);return waits.length;},clearTimer:()=>{}});
+ await callback();assert.equal(waits.at(-1),20000);p.wake();assert.equal(waits.at(-1),20000);p.stop();
+});
+
 test('accepted receipts in another chat retain exact identity without indefinitely blocking app reload',()=>{
  const receipts=ui.receipts();receipts.begin('A','request-A','Message');assert.equal(receipts.hasPending(),true);
  receipts.settle('A','request-A',{state:'sent',client_id:'client-A'});receipts.list('B',[]);
@@ -44,3 +66,10 @@ test('accepted receipts in another chat retain exact identity without indefinite
  receipts.list('A',[{role:'user',client_id:'different',text:'Message'}]);assert.equal(receipts.list('A').length,1);
  receipts.list('A',[{role:'user',client_id:'client-A'}]);assert.equal(receipts.list('A').length,0);
 });
+
+ test('a pending wake respects server cooldown and a cancelled callback cannot read while paused',async()=>{
+ let callback,resolve,reads=0;const waits=[];
+ const p=ui.poll({read:()=>{reads++;return new Promise(r=>resolve=r);},enabled:()=>true,delay:()=>750,retryAfter:()=>20000,setTimer:(fn,ms)=>{callback=fn;waits.push(ms);return waits.length;},clearTimer:()=>{}});
+ const tick=callback();p.wake();resolve(true);await tick;assert.equal(waits.at(-1),20000);
+ p.pause();await callback();assert.equal(reads,1);p.stop();
+ });

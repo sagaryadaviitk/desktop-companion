@@ -68,6 +68,7 @@ class HealthMonitorTests(unittest.TestCase):
 class LaunchAgentTests(unittest.TestCase):
     def setUp(self):
         events=patch('service.record_event');self.events=events.start();self.addCleanup(events.stop)
+        jitter=patch('service.random.random',return_value=1);jitter.start();self.addCleanup(jitter.stop)
 
     def test_web_deploy_restarts_only_server_and_preserves_tunnel_and_guard(self):
         server=Mock();server.poll.return_value=None

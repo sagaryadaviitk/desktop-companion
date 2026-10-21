@@ -28,6 +28,7 @@ from questions import pending_questions, answer_envelope, answer_identity, queue
 from desktop_runtime import DesktopRuntime,queue_photo_message,QueueNotClaimed,change_queued_message
 from approvals import ApprovalChanged, digest as approval_digest
 from computer_use import computer_use_snapshot
+from read_cache import ReadCache
 from promotions import QueuePromotions
 from photos import PhotoStore, PhotoError
 from new_chat import NewChat,PERSONAL_WORKSPACE,prompt_title
@@ -580,7 +581,7 @@ class CompanionServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 32
 
-    def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None):
+    def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None,read_cache=None):
         if remote and (access is None or settings is None):
             raise ValueError("The remote gateway requires authentication and explicit origin settings.")
         self.history = history
@@ -594,11 +595,17 @@ class CompanionServer(ThreadingHTTPServer):
         self.inbox = inbox or Inbox(journal.path.with_name('inbox.sqlite'))
         self.account = account
         self.runtime = runtime
+        self.reads = read_cache if read_cache is not None else ReadCache()
+        self.read_executor = ThreadPoolExecutor(max_workers=4,thread_name_prefix='companion-read')
         self.photos=photos
         self.new_chat=new_chat
         self.media=media or MediaStore(journal.path.parent/'media')
         self.slots = threading.BoundedSemaphore(32)
         super().__init__(address, Handler)
+
+    def server_close(self):
+        super().server_close()
+        self.read_executor.shutdown(wait=False,cancel_futures=True)
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
@@ -663,7 +670,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # Conversation IDs, prompts and browser secrets never enter request logs.
 
+    def invalidate_reads(self):
+        if getattr(self,"_invalidate_reads",False):
+            self.server.reads.clear()
+            self._invalidate_reads=False
+
     def reply(self, code, value, mime="application/json", extra_headers=None):
+        # Fence observational reads before the caller can consume a write reply.
+        self.invalidate_reads()
         data = json.dumps(value).encode() if mime == "application/json" else value
         self.send_response(code)
         self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith('text/') or mime=='application/json' else ''))
@@ -798,18 +812,27 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path.startswith('/api/photos/') and self.server.photos:
                 try:return self.reply(200,self.server.photos.read(parsed.path.removeprefix('/api/photos/'),session['id'] if session else 'local'),'image/jpeg')
                 except (KeyError,FileNotFoundError):return self.reply(404,{'error':'Photo unavailable.'})
+            if parsed.path == '/api/ready':
+                return self.reply(200, {'mode':'remote' if self.server.remote else 'local_preview',
+                                       'phone_setup_available':bool(self.server.access) and not self.server.remote,
+                                       'control':self.server.bridge.availability()})
+            if parsed.path == '/api/control/status' and not self.server.remote:
+                from control import read_snapshot
+                snapshot=self.server.reads.get('control',lambda:read_snapshot(ROOT),ttl=1)
+                return self.reply(200, {'ok':True,'snapshot':snapshot})
             if parsed.path == "/api/status":
                 origin = self.server.settings.origin() if self.server.settings else None
                 account=self.server.account.snapshot() if self.server.account else {'usage':{'available':False,'weekly':[],'checked_at':None,'stale':False,'reason':'Account usage is unavailable in this viewer.'},'models':[]}
                 execution={}
                 if self.server.runtime and hasattr(self.server.runtime,'execution_state'):
                     candidates=self.server.history.active_candidates()
-                    with ThreadPoolExecutor(max_workers=4) as executor:
-                        execution=dict(zip(candidates,executor.map(self.server.runtime.execution_state,candidates)))
+                    def read_execution(identifier):
+                        return self.server.reads.get(('execution',identifier),lambda:self.server.runtime.execution_state(identifier),ttl=.75)
+                    execution=dict(zip(candidates,self.server.read_executor.map(read_execution,candidates)))
                 return self.reply(200, {"build":web_build(),"execution":execution,"mode": "remote" if self.server.remote else "local_preview", "remote_access": self.server.remote, "public_origin": origin, "phone_setup_available": bool(self.server.access) and not self.server.remote, "control": self.server.bridge.availability(), "csrf": session["csrf"] if session else self.server.csrf, "power":cached_power_state(), "computer_use":computer_use_snapshot(ROOT/'.state'/'computer-use-check.json'), **account, "snapshot_at": int(time.time() * 1000)})
             if parsed.path=='/api/components':
                 from control import read_snapshot
-                snapshot=read_snapshot(ROOT)
+                snapshot=self.server.reads.get('control',lambda:read_snapshot(ROOT),ttl=1)
                 return self.reply(200,{key:snapshot[key] for key in ('components','summary','tunnel','checked_at')})
             if parsed.path == "/api/devices" and not self.server.remote and self.server.access:
                 return self.reply(200, {"devices": self.server.access.devices()})
@@ -877,6 +900,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.valid_origin():
             return self.reply(403, {"error": "This origin is not enabled."})
+        self._invalidate_reads=False
         try:
             if self.path == "/api/auth/login" and self.server.remote:
                 payload = self.read_payload()
@@ -892,6 +916,7 @@ class Handler(BaseHTTPRequestHandler):
             csrf = session["csrf"] if session else self.server.csrf
             if not secrets.compare_digest(self.headers.get("X-Companion-CSRF", ""), csrf):
                 return self.reply(403, {"error": "Refresh this page before making changes."})
+            self._invalidate_reads=True
             client_build=self.headers.get('X-Companion-UI')
             if client_build and client_build!=web_build():
                 return self.reply(409,{'error':'Companion was updated. Reload this tab before sending. Your instruction has not been submitted.','update_required':True})
@@ -1166,6 +1191,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": "Invalid command request."})
         except (sqlite3.Error, OSError):
             return self.reply(503, {"error": "The local command service is unavailable. Check the desktop before resending."})
+        finally:
+            self.invalidate_reads()
 
 
 def main():
@@ -1188,8 +1215,9 @@ def main():
     runtime=DesktopRuntime(args.codex_home,history.read_thread,queue_reader=history.queue_item,receipt_reader=history.has_client_receipt,promotions=QueuePromotions(ROOT/'.state'/'promotions.sqlite'),approval_redactor=redact)
     new_chat=NewChat(args.codex_home,PERSONAL_WORKSPACE)
     account.snapshot()
-    gateway = CompanionServer(("127.0.0.1", args.remote_port), history, bridge, journal, access=access, remote=True, settings=settings, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat)
-    server = CompanionServer(("127.0.0.1", args.port), history, bridge, journal, access=access, settings=settings, gateway_port=gateway.server_port, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat)
+    reads = ReadCache()
+    gateway = CompanionServer(("127.0.0.1", args.remote_port), history, bridge, journal, access=access, remote=True, settings=settings, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat,read_cache=reads)
+    server = CompanionServer(("127.0.0.1", args.port), history, bridge, journal, access=access, settings=settings, gateway_port=gateway.server_port, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat,read_cache=reads)
     worker = threading.Thread(target=gateway.serve_forever, daemon=True)
     worker.start()
     print(f"Desktop Companion: http://127.0.0.1:{server.server_port}", flush=True)

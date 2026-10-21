@@ -17,7 +17,7 @@ from configuration import load,save,ROOT,FILENAME
 
 MODULES=('access.py','approvals.py','build_app.py','companion.py','computer_use.py','configuration.py',
          'control.py','desktop_runtime.py','inbox.py','manage.py','media.py','new_chat.py','photos.py',
-         'power.py','promotions.py','questions.py','remote_access.py','runtime.py','service.py','system_status.py')
+         'power.py','promotions.py','questions.py','read_cache.py','remote_access.py','runtime.py','service.py','system_status.py')
 
 
 def native_build_tools():

@@ -1,5 +1,13 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const vm=require('node:vm');
-const context={window:{},URL};vm.runInNewContext(fs.readFileSync(__dirname+'/web/media.js','utf8'),context);const media=context.window.CompanionMedia;
+const context={window:{},URL,AbortController};vm.runInNewContext(fs.readFileSync(__dirname+'/web/media.js','utf8'),context);const media=context.window.CompanionMedia;
+test('media reads time out without retrying and clear their deadline after JSON completes',async()=>{
+ let timeout,cleared=0,calls=0;
+ const fetcher=(_path,{signal})=>{calls++;return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(Object.assign(new Error('timeout'),{name:'AbortError'}))));};
+ const pending=media.readJSON('/api/media',{fetcher,setTimer:fn=>{timeout=fn;return 1;},clearTimer:()=>cleared++});
+ timeout();await assert.rejects(pending,{name:'AbortError'});assert.equal(calls,1);assert.equal(cleared,1);
+ const result=await media.readJSON('/api/media',{fetcher:async()=>({ok:true,json:async()=>({items:[]})}),setTimer:()=>2,clearTimer:()=>cleared++});
+ assert.equal(result.data.items.length,0);assert.equal(cleared,2);
+});
 test('media resources accept only exact same-origin allowlisted item endpoints',()=>{
  const origin='https://phone.example',id='ep012-wifi-pilot-v2';
  assert.equal(media.resource(`/api/media/${id}/video?v=123`,id,'video',origin),`/api/media/${id}/video?v=123`);

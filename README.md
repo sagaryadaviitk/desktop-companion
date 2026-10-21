@@ -6,6 +6,16 @@ For a second Mac, start with [SETUP.md](SETUP.md). Each Mac has independent sett
 
 For an existing installation, follow [After pulling an update](#after-pulling-an-update). Pulling code alone does not replace a running process or update an installed LaunchAgent definition.
 
+## Responsive updates and recovery
+
+An open conversation checks for changes every 750 ms while working or awaiting delivery, and every 3 seconds while idle. These are polling intervals after a completed read, not a delivery-latency guarantee. The workspace checks every 5 seconds, or every 15 seconds inside a conversation. Hidden/offline views pause and resume with a fresh check. Failed reads use capped exponential backoff with equal jitter (up to 30 seconds), honoring bounded server `Retry-After` guidance. Sends, approvals and uncertain commands are never automatically replayed.
+
+Connection interruptions preserve the last conversation and unsent draft. Sending remains disabled until fresh controls are available. GET requests time out after 8 seconds; media-library refreshes are bounded and coalesced without interrupting the playing cut.
+
+The native app reads status through a local-only HTTP endpoint, with a bounded process fallback when the web service is unavailable. Active status refreshes every 2 seconds, inactive status every 15 seconds, and failures back off with jitter. Readiness checks do not enumerate active chat owners. Concurrent observational reads share short-lived results (750 ms for execution observations, 1 second for component snapshots), retain their original timestamps, and are invalidated after authenticated writes. Authorization and command preflight always use their existing live checks. Supervisor failure recovery also adds jitter while retaining its retry budget and circuit breaker.
+
+This release changes Python, Swift, web assets and supervisor behavior. Rebuild/reopen the native app and perform one coordinated supervisor restart; installations still on the older LaunchAgent definition should instead use the one-time installation action described below. Per-Mac configuration and pairing stay local.
+
 ## Install on a second Mac
 
 The source is in the private personal repository [sagaryadaviitk/desktop-companion](https://github.com/sagaryadaviitk/desktop-companion). Each Mac runs independently; Git shares code, not chat sessions, settings, browser pairing, or credentials. The agent on the new Mac should read this section, [AGENTS.md](AGENTS.md), and [SETUP.md](SETUP.md) before installing.

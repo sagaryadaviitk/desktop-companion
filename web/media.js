@@ -1,5 +1,12 @@
 "use strict";
 window.CompanionMedia = (() => {
+  async function readJSON(path, {fetcher=fetch,setTimer=setTimeout,clearTimer=clearTimeout}={}) {
+    const controller=new AbortController(),timer=setTimer(()=>controller.abort(),8000);
+    try {
+      const response=await fetcher(path,{cache:'no-store',credentials:'same-origin',signal:controller.signal});
+      return {response,data:response.ok?await response.json():null};
+    } finally { clearTimer(timer); }
+  }
   const validId = value => typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,79}$/.test(value);
   function resource(value, id, kind, origin) {
     if (!validId(id) || typeof value !== 'string') return null;
@@ -19,7 +26,7 @@ window.CompanionMedia = (() => {
   }
   function install() {
     const el = id => document.getElementById(id), video = el('review-video');
-    let items = [], selected = null, requestVersion = 0;
+    let items = [], selected = null, requestVersion = 0, libraryReading = false;
     const requested = new URLSearchParams(location.search).get('item');
     let desired = validId(requested) ? requested : null;
     function pairLink() { el('pair-link').href = desired ? '/?media=' + encodeURIComponent(desired) : '/'; }
@@ -73,14 +80,15 @@ window.CompanionMedia = (() => {
       return {id:item.id, title:typeof item.title === 'string' ? item.title : '', description:typeof item.description === 'string' ? item.description : '', version:typeof item.version === 'string' ? item.version : '', duration_seconds:item.duration_seconds, bytes:item.bytes, video_url, download_url, poster_url:resource(item.poster_url, item.id, 'poster', origin), captions_url:resource(item.captions_url, item.id, 'captions', origin)};
     }
     async function loadLibrary() {
+      if(libraryReading)return;libraryReading=true;
       const version = ++requestVersion; el('library-refresh').disabled = true; el('retry-library').hidden = true;
       if (!items.length) notice('Loading your private library…');
       try {
-        const response = await fetch('/api/media', {cache:'no-store', credentials:'same-origin'});
+        const {response,data} = await readJSON('/api/media');
         if (version !== requestVersion) return;
         if (response.status === 401) return lock();
         if (!response.ok) throw new Error(response.status === 403 ? 'This address is not enabled for your browser. Open the usual Companion address, then try Media review again.' : 'Your Mac could not load the media library. Check its connection and try again.');
-        const data = await response.json(); if (version !== requestVersion) return;
+        if (version !== requestVersion) return;
         if (!Array.isArray(data.items)) throw new Error('The media library returned an unexpected response. Refresh the page and try again.');
         items = data.items.map(sanitize).filter(Boolean);
         if (!items.length) { clearPlayer(); el('media-workspace').hidden = true; return notice('No media is available yet. Add a finished cut to the private library on your Mac, then refresh.'); }
@@ -91,8 +99,8 @@ window.CompanionMedia = (() => {
         if (missing) notice('That cut is no longer in this library. Showing another available cut.');
       } catch (error) {
         if (version !== requestVersion) return;
-        notice(error instanceof TypeError ? 'Could not reach your Mac. Check your connection, then try again.' : error.message, 'error', true);
-      } finally { if (version === requestVersion) el('library-refresh').disabled = false; }
+        notice(error.name==='AbortError'?'The library check timed out. Your current video is kept; try again when connected.':error instanceof TypeError ? 'Could not reach your Mac. Check your connection, then try again.' : error.message, 'error', true);
+      } finally { libraryReading=false;if (version === requestVersion) el('library-refresh').disabled = false; }
     }
     video.addEventListener('loadedmetadata', () => { if (selected) status('Ready to review. Tap play.'); });
     video.addEventListener('playing', () => { if (selected) status('Playing · use the controls to seek or change speed.'); });
@@ -101,14 +109,15 @@ window.CompanionMedia = (() => {
     video.addEventListener('error', async () => {
       if (!selected || !video.error || video.error.code === 1) return;
       const id = selected.id;
-      try { const response = await fetch('/api/auth/status', {cache:'no-store', credentials:'same-origin'}); const auth = response.ok ? await response.json() : null; if (selected?.id !== id) return; if (auth && !auth.authenticated) return lock(); } catch (_) {}
+      try { const {data:auth} = await readJSON('/api/auth/status'); if (selected?.id !== id) return; if (auth && !auth.authenticated) return lock(); } catch (_) {}
       if (selected?.id === id) status(video.error?.code === 3 || video.error?.code === 4 ? 'This browser could not play the video. Try reloading the player, another browser, or the download below.' : 'Streaming was interrupted. Check your connection and that your Mac is awake, then reload the player.', true);
     });
     el('retry-playback').addEventListener('click', () => { if (selected) choose(selected, true); });
     el('library-refresh').addEventListener('click', loadLibrary); el('retry-library').addEventListener('click', loadLibrary);
     document.addEventListener('visibilitychange', () => { if (!document.hidden && !selected) loadLibrary(); });
+    window.addEventListener('online',()=>{if(!selected)loadLibrary();});
     pairLink(); loadLibrary();
   }
   if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded', install, {once:true});
-  return {validId, resource, duration, fileSize};
+  return {validId, resource, duration, fileSize, readJSON};
 })();
