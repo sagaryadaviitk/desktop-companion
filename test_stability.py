@@ -139,6 +139,23 @@ class InstallationTests(unittest.TestCase):
     def definition(self,root,python):
         return service.definition(root,python,root,'/fixture/codex')
 
+    def test_launch_logs_survive_a_removed_source_directory(self):
+        home=Path('/fixture/home');root=home/'Developer/deleted-project'
+        value=service.definition(root,'/fixture/python',home,'/fixture/codex')
+        self.assertEqual(value['WorkingDirectory'],str(home))
+        for field in ('StandardOutPath','StandardErrorPath'):
+            self.assertEqual(Path(value[field]).parent,home/'Library/Logs/Desktop Companion')
+            self.assertNotIn(str(root),value[field])
+
+    def test_install_rejects_symlinked_log_directory_without_stopping_existing_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);target=root/'keep';target.mkdir();logs=root/'logs';logs.symlink_to(target)
+            definition={'StandardOutPath':str(logs/'service.log'),'StandardErrorPath':str(logs/'service-error.log')}
+            with patch.object(service,'STATE',root/'state'),patch.object(service,'PLIST',root/'agents/job.plist'),patch('service.definition',return_value=definition),patch('service.launchctl') as launch:
+                with self.assertRaisesRegex(RuntimeError,'log location is a symlink'):
+                    service.install(background_install_approved=True)
+            launch.assert_not_called();self.assertEqual(list(target.iterdir()),[])
+
     def test_missing_entrypoint_exits_successfully_without_running_python(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

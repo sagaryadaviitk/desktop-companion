@@ -70,8 +70,8 @@ def definition(root=ROOT, python=sys.executable, home=None, codex=None):
         "ExitTimeOut": 20,
         "AbandonProcessGroup": False,
         "Umask": 0o077,
-        "StandardOutPath": str(root / ".state" / "service.log"),
-        "StandardErrorPath": str(root / ".state" / "service-error.log"),
+        "StandardOutPath": str(home / "Library" / "Logs" / "Desktop Companion" / "service.log"),
+        "StandardErrorPath": str(home / "Library" / "Logs" / "Desktop Companion" / "service-error.log"),
     }
 
 
@@ -356,10 +356,16 @@ def install(*,background_install_approved=False):
     value=definition()
     STATE.mkdir(mode=0o700,exist_ok=True)
     PLIST.parent.mkdir(parents=True,exist_ok=True)
-    for filename in ("service.log","service-error.log"):
-        path = STATE / filename
-        path.touch(exist_ok=True)
-        path.chmod(0o600)
+    log_directory=Path(value['StandardOutPath']).parent
+    log_paths=[Path(value[key]) for key in ('StandardOutPath','StandardErrorPath')]
+    if log_directory.is_symlink() or any(path.is_symlink() for path in log_paths):
+        raise RuntimeError('The service log location is a symlink; installation stopped.')
+    log_directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+    log_directory.chmod(0o700)
+    for path in log_paths:
+        descriptor=os.open(path,os.O_CREAT|os.O_APPEND|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+        try:os.fchmod(descriptor,0o600)
+        finally:os.close(descriptor)
     if launchctl("print",TARGET,check=False).returncode == 0:
         launchctl("bootout",TARGET)
     PLIST.write_bytes(plistlib.dumps(value))
