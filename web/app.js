@@ -94,6 +94,11 @@ function updateComposer(){
   // A temporary connection failure must never prevent drafting. Sending still
   // requires a fresh, available control channel below.
   input.disabled=!selectedData||Boolean(selectedData.archived);
+  if(!available||!connected){
+    pendingSignature='';
+    for(const button of el('pending').querySelectorAll('.queue-action'))button.disabled=true;
+  }
+  el('queue-save').disabled=!available||!connected||Boolean(queueUI?.isBusy());
   const live=selectedData?.control?.live||{},canSteer=live.steer===true,canSend=live.send_now===true;
   if(deliveryMode==='queue'&&canSend||deliveryMode==='steer'&&!canSteer&&canSend)deliveryMode='send';
   if(deliveryMode==='send'&&!canSend)deliveryMode='queue';
@@ -241,7 +246,7 @@ async function steerQueued(instruction,data){
   }finally{queueSteering.delete(instruction.id);pendingSignature='';questionSignature='';if(version===authVersion&&target===selected)await refreshChat();}
 }
 
-queueUI=CompanionQueue.install({getChat:()=>selectedData,isConnected:()=>connected,
+queueUI=CompanionQueue.install({getChat:()=>selectedData,isConnected:()=>Boolean(connected&&selectedData?.control?.available),
  request:(path,payload)=>api(path,{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify(payload)}),
  steer:steerQueued,refresh:async()=>{pendingSignature='';await refreshChat();},onResult:showCommandResult});
 
