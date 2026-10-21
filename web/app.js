@@ -112,6 +112,8 @@ function updateComposer(){
   for(const mode of ['queue','steer'])el('mode-'+mode).setAttribute('aria-pressed',String(mode==='queue'?deliveryMode!=='steer':deliveryMode==='steer'));
   if(selectedData)el('control-status').textContent=!connected?'You can keep drafting. Reconnect to send your message.':!available?(selectedData.control.reason||'Sending is unavailable. You can keep drafting.'):retrying?'Check the previous request before sending a new instruction. This retry keeps its original identity and delivery mode.':deliveryMode==='steer'?'Send guidance into the active desktop turn.':deliveryMode==='send'?'Send now and start the next turn in this desktop chat.':canSteer?'Wait until the current turn finishes. Choose Steer to redirect it now.':(live.reason||'Follow-ups wait in this chat’s desktop queue.');
   el('connect-chat').hidden=!available||!connected||live.connected===true||live.model_selection===true;el('connect-chat').disabled=connectingChat||sending;
+  el('connect-chat').textContent=connectingChat?'Connecting to desktop…':'Connect this chat to desktop ↗';
+  el('connect-chat').setAttribute('aria-busy',String(connectingChat));
   const model=live.model||selectedData?.details?.model;
   const modelName=(currentStatus?.models||[]).find(item=>item.id===model)?.name||model;
   el('model-trigger').textContent=modelName&&modelName!=='Unknown'?modelName+' ⌄':'Model & controls ⌄';el('model-trigger').disabled=!selected;
@@ -630,7 +632,7 @@ async function readCurrentChat() {
     el("title").textContent=data.title; el("workspace").textContent=data.workspace||"LOCAL CHAT";
     const labels={inProgress:"In progress at last recorded update",completed:"Last turn completed",interrupted:"Last turn interrupted",failed:"Last turn failed"};
     const execution=data.control.live?.execution;
-    const status=execution?.approval_count?'Waiting for your response':execution?.status==='working'?'Working now':execution?.status==='idle'?'Ready for your message':data.last_recorded_turn?.status==='inProgress'?'Live status unavailable':labels[data.last_recorded_turn?.status]||'Recorded conversation';
+    const status=execution?.approval_count?'Waiting for your response':execution?.status==='working'?'Working now':execution?.status==='idle'?'Ready for your message':data.control.live?.connected&&execution?.status==='unknown'?'Connected · live activity unavailable':data.last_recorded_turn?.status==='inProgress'?'Live status unavailable':labels[data.last_recorded_turn?.status]||'Recorded conversation';
     const timestamps=data.messages.map(message=>message.timestamp||0);
     const latest=Math.max(data.updated_at||0,...timestamps);
     el("activity").textContent=`${status} · Updated ${shortTime(latest)}`;
@@ -821,7 +823,25 @@ el("composer").addEventListener("submit",async event=>{
   }catch(error){attempt.retrying=true;const rejected=error.result?.state==='rejected'||error.status>=400&&error.status<500&&error.result?.state!=='unknown'&&error.status!==429;if(rejected)commandAttempts.delete(target);deliveryReceipts.remove(attempt.id);if(version===authVersion&&selected===target)el("command-result").textContent=rejected?`${error.message} Your draft is kept. Refresh and send again when ready.`:`${error.message} Your draft is kept. Check ${mode==='queue'?'the queued follow-ups':'the desktop conversation'} before retrying; an unchanged retry uses the same request ID.`;}
   finally{sending=false;if(version===authVersion){renderMessages();updateComposer();await refreshChat(true);}}
 });
-el('connect-chat').addEventListener('click',async()=>{if(connectingChat||!selected)return;const target=selected;connectingChat=true;updateComposer();try{const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});if(target===selected){showCommandResult(result.message,true);await refreshChat();}}catch(error){if(target===selected)showCommandResult(error.message);}finally{connectingChat=false;updateComposer();}});
+el('connect-chat').addEventListener('click',async()=>{
+  if(connectingChat||!selected)return;
+  const target=selected,version=authVersion,selection=selectionVersion;
+  const isCurrent=()=>target===selected&&version===authVersion&&selection===selectionVersion;
+  connectingChat=true;updateComposer();
+  try{
+    // Opening is requested exactly once. Its acknowledgement is not proof that
+    // the desktop has finished loading the chat; only fresh reads confirm that.
+    const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});
+    if(!isCurrent())return;
+    showCommandResult(result.message);
+    const outcome=await CompanionConversation.waitForConnection({read:()=>refreshChat(true),isCurrent,retryAfter:()=>Math.max(0,readRetryAt-Date.now()),
+      isConnected:()=>selectedData?.control?.live?.connected===true||selectedData?.control?.live?.model_selection===true});
+    if(!isCurrent())return;
+    if(outcome==='connected')showCommandResult('Connected to desktop.',true);
+    else if(outcome==='timeout')showCommandResult('The chat was opened, but its live connection could not be confirmed. Check the chat on your Mac, then try Connect again. Your draft is kept.');
+  }catch(error){if(isCurrent())showCommandResult(error.message);}
+  finally{connectingChat=false;updateComposer();}
+});
 if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>photoStorageBusy||approvalUI?.busy()||sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else if(document.body.classList.contains('home-open')||!selected)showNotice(message);else showCommandResult(message);}});
 el('app-reload').addEventListener('click',()=>updater?.reload());
 window.addEventListener('pageshow',event=>{if(event.persisted&&!document.body.classList.contains('signed-out'))refreshAll(true);});

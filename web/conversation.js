@@ -41,6 +41,18 @@ window.CompanionConversation={
           pause(){paused=true;wakePending=false;clearTimer(timer);},
           stop(){stopped=true;clearTimer(timer);}};
  },
+ async waitForConnection({read,isConnected,isCurrent,retryAfter=()=>0,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),random=Math.random,timeout=15000}){
+  const deadline=now()+timeout;let attempts=0;
+  while(isCurrent()&&now()<deadline){
+   let fresh=false;try{fresh=await read()!==false;}catch(_){/* Only observational reads are retried. */}
+   if(!isCurrent())return 'cancelled';
+   if(fresh&&isConnected())return 'connected';
+   const remaining=deadline-now();if(remaining<=0)break;
+   const cap=Math.min(2000,500*2**Math.min(attempts++,3));
+   await sleep(Math.min(remaining,Math.max(retryAfter(),cap*(.5+.5*random()))));
+  }
+  return isCurrent()?'timeout':'cancelled';
+ },
  scroller(panel,{changed=()=>{},frame=requestAnimationFrame,Resize=window.ResizeObserver,Mutation=window.MutationObserver}={}){
   let following=true,scheduled=false,adjusting=false;
   function visible(){return panel.clientHeight>0;}

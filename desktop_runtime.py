@@ -5,6 +5,8 @@ The phone never chooses an IPC method, socket, owner, or permission configuratio
 """
 
 import json
+from collections import OrderedDict
+import threading
 import base64
 import hashlib
 import os
@@ -124,6 +126,10 @@ def claim_queued_message(thread_id,item,client_factory=RpcClient,executable=None
         raise
 
 
+class DesktopSnapshotTooLarge(RuntimeUnavailable):
+    """The owner is reachable, but its full activity snapshot exceeds our bound."""
+
+
 class DesktopClient:
     VERSIONS = {'initialize': 0, 'thread-owner-discovery': 1,
                 'thread-follower-read-model-settings': 1,
@@ -211,7 +217,8 @@ class DesktopClient:
             deadline=time.monotonic()+self.timeout
             while time.monotonic()<deadline:
                 size=struct.unpack('<I',self._read(4,deadline))[0]
-                if not 0<size<=32*1024*1024:raise RuntimeUnavailable('Desktop state exceeded the supported size.')
+                if size<=0:raise RuntimeUnavailable('Unexpected desktop snapshot frame.')
+                if size>32*1024*1024:raise DesktopSnapshotTooLarge('Desktop state exceeded the supported size.')
                 value=json.loads(self._read(size,deadline))
                 if not isinstance(value,dict):raise RuntimeUnavailable('Unexpected desktop snapshot frame.')
                 params=value.get('params',{});change=params.get('change',{})
@@ -248,7 +255,7 @@ class DesktopClient:
 class DesktopRuntime:
     REASON = 'Live desktop controls are disconnected. Queue can still save a follow-up for later.'
 
-    def __init__(self, home, thread_reader, client_factory=DesktopClient, shared=None,queue_reader=None,receipt_reader=None,promotions=None,queue_claimer=None,approval_redactor=str):
+    def __init__(self, home, thread_reader, client_factory=DesktopClient, shared=None,queue_reader=None,receipt_reader=None,promotions=None,queue_claimer=None,approval_redactor=str,observation_clock=time.monotonic):
         self.home = Path(home).resolve()
         self.socket = self.home / 'ipc' / 'ipc.sock'
         self.thread_reader = thread_reader
@@ -257,6 +264,9 @@ class DesktopRuntime:
         self.queue_reader=queue_reader;self.receipt_reader=receipt_reader;self.promotions=promotions
         self.queue_claimer=queue_claimer
         self.approval_redactor=approval_redactor
+        self.observation_clock=observation_clock
+        self.large_snapshots=OrderedDict()
+        self.observation_lock=threading.Lock()
 
     def present(self):
         try:
@@ -282,17 +292,44 @@ class DesktopRuntime:
             raise RuntimeUnavailable('This chat is not loaded in the desktop. Open it on your Mac first.')
         return owner, settings
 
+    def observe_execution(self,client,thread_id,owner,include_approvals=False):
+        # A large history must not be re-serialized by the desktop on every
+        # phone poll. This cooldown applies only to reads, never action preflight.
+        key=(thread_id,owner)
+        with self.observation_lock:
+            if self.large_snapshots.get(key,0)>self.observation_clock():
+                raise DesktopSnapshotTooLarge('Desktop state exceeded the supported size.')
+            self.large_snapshots.pop(key,None)
+        try:
+            return client.execution_state(thread_id,owner,include_approvals=include_approvals,redact=self.approval_redactor)
+        except DesktopSnapshotTooLarge:
+            with self.observation_lock:
+                self.large_snapshots[key]=self.observation_clock()+30
+                self.large_snapshots.move_to_end(key)
+                while len(self.large_snapshots)>64:self.large_snapshots.popitem(last=False)
+            raise
+
     def capabilities(self, thread_id):
-        value = {'steer': False, 'send_now': False, 'model_selection': False, 'reason': self.REASON}
+        value = {'steer': False, 'send_now': False, 'model_selection': False, 'connected':False, 'reason': self.REASON}
         try:
             with self.client(timeout=2) as client:
                 owner, settings = self.owner(client, thread_id)
-                execution=client.execution_state(thread_id,owner,include_approvals=True,redact=self.approval_redactor)
+                # Owner discovery + resumed model settings establish the chat
+                # connection independently of its potentially enormous history.
+                value.update(connected=True,model_selection=True,model=settings.get('model'),effort=settings.get('reasoningEffort'),
+                             model_reason='Connected. Model and reasoning changes apply to subsequent turns in this chat.',reason='Connected to the desktop chat.')
+                try:
+                    execution=self.observe_execution(client,thread_id,owner,include_approvals=True)
+                except (OSError,ValueError,KeyError,TypeError,AttributeError,RuntimeUnavailable) as error:
+                    reason=('The live activity snapshot is too large to check here.' if isinstance(error,DesktopSnapshotTooLarge)
+                            else 'Live activity is temporarily unavailable.')
+                    return {**value,'execution':{'status':'unknown','turn_id':None,'checked_at':int(time.time()*1000)},
+                            'reason':'Connected to desktop. '+reason+' You can queue a follow-up; Send and Steer need a fresh activity check.',
+                            'steer_reason':reason}
             active = execution['status']=='working' and bool(execution['turn_id'])
-            return {**value, 'steer': active, 'steer_reason':'', 'send_now': execution['status']=='idle', 'queue_steer':bool(active and self.promotions and self.queue_reader), 'model_selection':True,'connected': True,'execution':execution,
-                    'reason':'Connected to the desktop chat.', 'model': settings.get('model'),
-                    'effort': settings.get('reasoningEffort'),
-                    'model_reason': 'Connected. Model and reasoning changes apply to subsequent turns in this chat.'}
+            return {**value, 'steer': active, 'steer_reason':'', 'send_now': execution['status']=='idle',
+                    'queue_steer':bool(active and self.promotions and self.queue_reader), 'execution':execution,
+                    'reason':'Connected to the desktop chat.'}
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeUnavailable):
             return value
 
@@ -300,7 +337,7 @@ class DesktopRuntime:
         try:
             with self.client(timeout=1) as client:
                 owner,_=self.owner(client,thread_id)
-                return client.execution_state(thread_id,owner)
+                return self.observe_execution(client,thread_id,owner)
         except (OSError,ValueError,KeyError,TypeError,AttributeError,RuntimeUnavailable):
             return {'status':'unknown','turn_id':None,'checked_at':int(time.time()*1000)}
 
