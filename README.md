@@ -4,6 +4,8 @@ Browse the desktop app’s local projects, chats, history, and recorded progress
 
 For a second Mac, start with [SETUP.md](SETUP.md). Each Mac has independent settings, history, pairing, and tunnel access. A clean source copy starts locally only.
 
+For an existing installation, follow [After pulling an update](#after-pulling-an-update). Pulling code alone does not replace a running process or update an installed LaunchAgent definition.
+
 ## Install on a second Mac
 
 The source is in the private personal repository [sagaryadaviitk/desktop-companion](https://github.com/sagaryadaviitk/desktop-companion). Each Mac runs independently; Git shares code, not chat sessions, settings, browser pairing, or credentials. The agent on the new Mac should read this section, [AGENTS.md](AGENTS.md), and [SETUP.md](SETUP.md) before installing.
@@ -47,7 +49,54 @@ curl -s -o /dev/null -w '%{http_code}\n' https://agents-second.sagaryadav.me/api
 
 The local health endpoint should return `ok: true`. An **unpaired** public API request should return **401**; this proves the protected route is reachable, not that the phone is paired. From the paired phone, open a chat, send a harmless message, and verify it appears exactly once in desktop history. Test photos, a fresh locked native-app turn, and lid-close/mobile-data continuity separately. Do not mark those tests passed based only on a running process, installed plug-in, or green tunnel node.
 
-For subsequent updates, use a clean `main` checkout and `git pull --ff-only`, then run the tests. Static web assets require no restart. Python HTTP/bridge updates use `python3 service.py restart-web`; native Swift changes use `python3 build_app.py` and reopening the control app. A supervisor or machine-configuration update needs one coordinated full restart. Work in a separate feature worktree so edits do not change the installed service underneath it. [CONTRIBUTING.md](CONTRIBUTING.md) has the exact update/PR workflow; [SETUP.md](SETUP.md) covers troubleshooting and per-Mac configuration.
+## After pulling an update
+
+Use the permanent source folder already installed on **that Mac**. First run `git status --short`; if it reports changes, preserve that work before switching branches or pulling. Then:
+
+```sh
+git fetch origin
+git switch main
+git pull --ff-only
+git log -1 --oneline
+python3 manage.py doctor
+python3 -m unittest discover -p 'test_*.py' -q
+node --test test_*.cjs
+```
+
+Apply only the action required by the changed files or the release note below. Avoid a full-system restart for every pull: it closes established phone-tunnel connections.
+
+| Change pulled | Action on this Mac |
+| --- | --- |
+| Documentation or tests only | No runtime action. |
+| Static assets in `web/` | No service restart. Refresh the browser when its draft/photos are safe. |
+| Python HTTP/desktop bridge | `python3 service.py restart-web`; the tunnel and awake guard stay running. |
+| Native Swift or `build_app.py` | `python3 build_app.py`, then reopen Desktop Companion from Raycast. |
+| Supervisor behavior in `service.py`, or intentional machine configuration changes | One coordinated `python3 service.py restart`. |
+| LaunchAgent definition, startup guard, Python path or login-log location | `python3 service.py install --background-install-approved` updates the approved job and restarts it once. No additional `restart` is needed. |
+| Optional Cloudflare outage page | Follow [its separate deployment instructions](cloudflare_fallback/README.md) for this Mac's hostname. |
+
+When an update changes both supervisor behavior and its LaunchAgent definition, use the installation action once; it covers both changes.
+
+### One-time upgrade from `999f022` or an older recovery service
+
+The recovery-hardening release `3f10e4f` (#8), included with media review in `21499f3`, changes both the supervisor and the installed LaunchAgent definition. Existing installations that have not applied that definition must run this **once after pulling**:
+
+```sh
+python3 service.py install --background-install-approved
+python3 service.py status
+```
+
+This replaces the existing approved Companion job and briefly disconnects this Mac's phone tunnel. `restart-web` or `restart` alone cannot rewrite the old job definition. This release has no native Swift change, so it does not require rebuilding the native app. Later documentation-only pulls do not require repeating the installation.
+
+Keep this Mac's `config.local.json`, `.state/`, hostname, tunnel credentials and pairing. An existing installation does not need to run `manage.py setup` or reconfigure its hostname just to apply this update. The approval flag expresses operator intent; it does not grant a security exception.
+
+After the applicable action, check `python3 service.py status`, both local health endpoints, and **System status**. An anonymous request to **this Mac's** public `/api/chats` should return **401**. Verify an actual paired-phone message separately if command-delivery behavior changed. A green health panel is not an end-to-end delivery test.
+
+### Shared code and per-Mac network settings
+
+Recovery isolation and safe startup are general improvements for every Mac. Proxy settings, corporate security policy, certificate trust, Cloudflare client installations and any approved network-specific adjustments belong to the individual Mac. Pulling source does not install Zscaler or apply another Mac's network settings. A Mac without Zscaler does not need the managed Mac's Zscaler investigation or policy changes.
+
+Keep machine-specific diagnostics in ignored/private local files. Never copy them into shared configuration or apply a managed-network workaround to all Macs. [CONTRIBUTING.md](CONTRIBUTING.md) covers feature worktrees and PRs; [SETUP.md](SETUP.md) covers independent installation and troubleshooting.
 
 ## Everyday use
 
@@ -132,7 +181,9 @@ An awake-guard failure recovers independently and leaves the web server and tunn
 
 Credential-free lifecycle records in private `.state/tunnel-events.jsonl` distinguish supervisor starts, connector exits, network-change decisions, watchdog recovery, and public health transitions. They rotate at 256 KB with one previous file and accept only fixed event names, numeric process/status fields, and known reason codes. Raw connector logs are retained between attempts instead of being overwritten on every retry. Neither file is included in a source export.
 
-Deployment investigation, 2026-10-20: the public gateway returned the expected anonymous HTTP 401 at 16:17:53 UTC even while connection resets were recorded. Later full-group restarts at 16:57:53, 17:01:17, and 17:03:30 UTC necessarily tore down the tunnel. Fresh HTTP/2 registration now fails, and a certificate probe confirms Zscaler TLS inspection on that path. Reconnection after the full restarts may have exposed the fresh-handshake failure; the exact onset and policy change remain unproven. Do not infer that every reset meant public access was already down. Web-only recovery was subsequently verified to replace the server while preserving supervisor and awake-guard PIDs and restoring local health. The tunnel was already in retry backoff, so that live check does not establish continuity of a healthy public tunnel.
+A public health warning does not always mean the tunnel disconnected. `public_degraded` with status `0` means the HTTPS probe did not complete; with registered edges and unchanged connector/controller PIDs, this is a public-reachability uncertainty, not evidence of a connector restart. A subsequent `public_ready` with status `401` confirms that probe recovered. Keep the warning visible while reachability is unverified, and inspect connector exits, edge registrations and public probes separately. A registered edge alone does not prove that a phone request succeeded.
+
+Full-group restarts always close established tunnel connections. A network may preserve an existing connection while resetting a fresh handshake, so repeated group restarts can worsen an intermittent outage. Use web-only recovery when appropriate and retain the actual machine's failure evidence privately. TLS inspection observed on one managed Mac does not establish a fault on another Mac or, by itself, explain a reset.
 
 For foreground debugging, stop the installed service first so copies do not compete for ports:
 

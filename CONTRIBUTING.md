@@ -53,23 +53,29 @@ Use a distinct branch for each agent's work. Review the diff and CI checks, merg
 From a clean checkout:
 
 ```sh
+git fetch origin
 git switch main
 git pull --ff-only
+python3 manage.py doctor
 python3 -m unittest discover -p 'test_*.py' -q
 node --test test_*.cjs
 ```
 
-Node 24 is used by CI; Python 3.11 or newer is required. There are no Python package dependencies. Use the commands appropriate to the files changed:
+Node 24 is used by CI; Python 3.11 or newer is required. There are no Python package dependencies. Read the [release-specific action in README](README.md#one-time-upgrade-from-999f022-or-an-older-recovery-service), then use the commands appropriate to the files changed:
 
 | Changed source | Apply locally |
 | --- | --- |
+| Documentation or tests only | No runtime action. |
 | Static files in `web/` | No service restart. Open tabs detect the update; refresh when a draft is safe. |
 | Python HTTP/bridge code | `python3 service.py restart-web` preserves the tunnel and awake guard. |
 | Native Swift code or `build_app.py` | `python3 build_app.py`, then reopen Desktop Companion from Raycast. |
 | `service.py` supervisor logic or machine configuration | Schedule one `python3 service.py restart`; this recreates the whole group and disconnects the existing tunnel. |
+| LaunchAgent definition, startup guard, Python path or login-log location | Update the existing approved job with `python3 service.py install --background-install-approved`. This restarts once; an extra `restart` is unnecessary. |
 | Optional outage page | Follow [cloudflare_fallback/README.md](cloudflare_fallback/README.md) for that Mac's hostname. |
 
 Check `python3 service.py status` and `python3 manage.py doctor` afterward. Local health, public authentication, real message delivery, and locked-screen native interaction are separate checks.
+
+The recovery-hardening release in `21499f3` requires that one-time job update when upgrading from `999f022` or another installation with the old LaunchAgent definition. Pulling source or restarting the old job does not rewrite its definition. Preserve each Mac's own local configuration and runtime stores. Network-specific diagnostics or managed-proxy changes stay local to that Mac; a documentation update does not authorize or deploy them elsewhere.
 
 The native app's Appearance setting is local to that Mac, and web appearance is local to each browser. Pulling source updates the available design without sharing these preferences.
 
