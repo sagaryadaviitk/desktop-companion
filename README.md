@@ -220,6 +220,10 @@ The sleep setting persists beyond stopping/uninstalling Companion and also block
 
 The OpenAI Locked Use component can be current and enabled while an automatic unlock is refused. OpenAI scopes unlock to active trusted Computer Use turns and pauses it after local keyboard/pointer input until a manual unlock. The recovery procedure is to unlock manually once, confirm Locked use is enabled, lock again, and start a fresh native-app test from the phone. Companion cannot override that authorization or promise that it will never require manual recovery. A 2026-10-21 check reproduced the refusal, then successfully read native Chrome after a manual unlock and a new user-confirmed lock. This is a bounded test, not continuous certification. See the [official Locked Use guide](https://learn.chatgpt.com/docs/computer-use#locked-use). Mac status shows the component and last check. Physical lid-close/mobile-data continuity and native desktop access must be checked separately on each Mac. Setup on a second Mac does not apply power or security settings automatically.
 
+## Independent local assistant
+
+The phone menu's **Local assistant** opens a separate Exo-backed chat area for light work, selected saved skills, read-only workspace files and authenticated API diagnostics. Local conversations never modify existing cloud chats or their model settings. Configure Exo, skill roots and private API profiles independently on each Mac; this feature defaults to disabled. See [local setup, office authentication and limits](LOCAL_ASSISTANT.md).
+
 ## Architecture and safety boundaries
 
 - `companion.py`: HTTP routes and a version-specific read-only history adapter.
