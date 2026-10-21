@@ -51,6 +51,22 @@ For subsequent updates, use a clean `main` checkout and `git pull --ff-only`, th
 
 ## Everyday use
 
+### Private video review on your phone
+
+Open **… → Media review** to play explicitly shared review videos on the same phone hostname. The library, video bytes, posters, captions, and downloads use the existing browser pairing. An unpaired visitor sees a generic connection screen, without titles or media. Native controls support inline phone playback, seeking, captions, fullscreen, and downloading the original snapshot. The Mac must remain awake and connected; these are not public uploads or cloud storage.
+
+Publish only the specific review assets needed, from this installed source folder:
+
+```sh
+python3 media.py /absolute/path/pilot.mp4 --id episode-pilot-v2 \
+  --title "Episode pilot" --version "Pilot v2 · Review" --duration 50 \
+  --poster /absolute/path/poster.png --captions /absolute/path/narration.vtt
+```
+
+Then open `https://YOUR-PHONE-HOSTNAME/media?item=episode-pilot-v2`. The command makes private snapshots under ignored `.state/media/`; it does not expose the source folder or accept remote filesystem paths. Publishing a new snapshot needs no service restart. New source checkouts and exports contain the player code, never the media or private catalog. Each Mac publishes its own selected files independently.
+
+Media responses are streamed with byte ranges for seeking, carry private/no-store headers, and are reauthenticated on every request. Signing out or revoking a browser prevents subsequent media reads. It cannot erase bytes already downloaded to that browser. Keep browser pairing, TLS, and origin checks enabled when extending these routes.
+
 Open **Raycast → Desktop Companion** for the native control app. It shows the web server, desktop connection, tunnel, battery/lid state, unattended settings, pairing-code history, and browser sessions. It can start/restart the service even if the dashboard is unavailable. Closing the control app leaves the background service running.
 
 The local dashboard is <http://127.0.0.1:8765>. Phone access uses the hostname configured for that Mac and an authenticated gateway on loopback port 8766. Create a pairing code in **Phone access**, enter it on your own phone browser, and use the same phone address afterward. Pairing codes are one-use and expire after five minutes; browser sessions expire after seven days or immediately upon revocation. Code/token values are never recoverable from history.

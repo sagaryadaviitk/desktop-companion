@@ -203,6 +203,7 @@ dialog p,.panel-help {font-size:13px;line-height:1.65}
 .update-banner {background:var(--blue-soft);border-color:var(--blue-border);color:var(--blue)}
 .update-banner button {background:var(--panel);border-color:var(--blue-border);color:var(--blue)}
 .system-open {display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:66px;width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--field);text-align:left;color:var(--text);font-size:14px;font-weight:600}
+a.system-open {text-decoration:none}
 .system-open:hover {background:var(--raised)}.system-open small {display:block;font-size:12px;font-weight:400;color:var(--muted);margin-top:4px}
 .system-open>span:last-child {font-size:24px;font-weight:400;color:var(--muted)}
 #system-dialog {width:min(560px,calc(100vw - 24px));max-width:calc(100vw - 24px);max-height:calc(var(--app-height,100dvh) - 24px);overflow:auto}
