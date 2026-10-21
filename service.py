@@ -316,7 +316,7 @@ def supervise():
                 tunnel_retry_at=recover_tunnel(children,0,now,budget=tunnel_budget)
             write_runtime(children)
             record_event(STATE,'supervisor_started',supervisor_pid=os.getpid())
-            print("Supervised companion and battery/adapter idle-sleep prevention started. Phone access: "+('configured' if CONFIG.remote_enabled else 'local only'),flush=True)
+            print("Companion supervision started. Check component status for readiness. Phone access: "+('configured' if CONFIG.remote_enabled else 'local only'),flush=True)
             server_retry_at=0
             network=NetworkRecovery();next_network_check=0
             while not stopping.wait(1):

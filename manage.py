@@ -87,7 +87,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__);commands=parser.add_subparsers(dest='command',required=True)
     commands.add_parser('doctor')
     configure=commands.add_parser('configure');configure.add_argument('--hostname');configure.add_argument('--tunnel-id');configure.add_argument('--desktop-app');configure.add_argument('--local',action='store_true')
-    setup=commands.add_parser('setup');setup.add_argument('--without-app',action='store_true',help='Run the web service without building the native control app')
+    setup=commands.add_parser('setup');setup.add_argument('--without-app',action='store_true',help='Skip building the native control app during preparation')
     setup.add_argument('--install-service',action='store_true',help='Explicitly install login startup after reviewing machine security requirements')
     export=commands.add_parser('bundle');export.add_argument('--output',type=Path,default=ROOT/'.state/exports/Desktop-Companion-source.zip')
     args=parser.parse_args()

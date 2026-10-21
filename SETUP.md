@@ -20,7 +20,7 @@ The native build check runs the Swift compiler and verifies the selected macOS S
 
 Native app updates copy the completed build into a temporary folder beside the destination before replacing the installed app. A failed copy leaves the working app untouched; a failed activation restores it. The previous version is retained at `~/Applications/.Desktop Companion.previous`. Because the replacement renames stay on the destination disk, the source folder can live on a different volume. A running copy is not restarted by this installer; reopen the control app after a successful update.
 
-A clean copy starts **locally only** at <http://127.0.0.1:8765>. Setup does not change sleep, passwords, FileVault, or Locked Use. Choose those settings separately in the native app when needed. The setup check reads history metadata and checks dependencies; it does not read credentials or send chat instructions.
+A clean copy is configured **locally only**; after explicit service installation, the dashboard is <http://127.0.0.1:8765>. Setup does not change sleep, passwords, FileVault, or Locked Use. Choose those settings separately in the native app when needed. The setup check reads history metadata and checks dependencies; it does not read credentials or send chat instructions.
 
 ## Background installation and security recovery
 

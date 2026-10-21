@@ -183,6 +183,18 @@ class InstallationTests(unittest.TestCase):
             result=subprocess.run([sys.executable,str(root/'service.py'),'run'],cwd=root,capture_output=True,text=True,timeout=5)
         self.assertEqual(result.returncode,0);self.assertIn('Automatic startup stopped',result.stderr)
 
+    def test_invalid_configuration_stops_automatic_startup_without_running_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'service.py').write_text(Path(service.__file__).read_text())
+            (root/'power.py').write_text('AWAKE_COMMAND=[]')
+            (root/'configuration.py').write_text('def load(root): raise ValueError("invalid fixture")')
+            (root/'system_status.py').write_text('publish=read_record=record_event=None')
+            result=subprocess.run([sys.executable,str(root/'service.py'),'run'],cwd=root,capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0)
+        self.assertIn('configuration is unavailable',result.stderr)
+        self.assertFalse((root/'.state').exists())
+
     def test_supervisor_initial_guard_failure_does_not_relaunch_chatgpt_or_stop_web(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);stop=Mock();stop.is_set.return_value=False;stop.wait.side_effect=[False,True]
