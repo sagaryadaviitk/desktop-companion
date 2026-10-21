@@ -73,9 +73,18 @@ final class ControlModel: ObservableObject {
     @Published var busy = false
     @Published var refreshing = false
     private var timer: AnyCancellable?
+    private var activation: AnyCancellable?
     private var actionGeneration = 0
     private var waitingForRecovery = false
     private var expectedPowerSettings: UnattendedSettings?
+    private var nextStatusRead = Date.distantPast
+    private var statusFailures = 0
+    private let statusSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3
+        configuration.timeoutIntervalForResource = 4
+        return URLSession(configuration: configuration)
+    }()
     @Published private var statusReadFailed = false
     @Published private var statusClock = Date()
     var statusStale: Bool { !StatusFreshness.isFresh(checkedAt: snapshot?.checked_at, failed: statusReadFailed, now: statusClock.timeIntervalSince1970) }
@@ -86,10 +95,28 @@ final class ControlModel: ObservableObject {
 
     init() {
         refresh()
-        timer = Timer.publish(every: 5, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.refresh() }
+        timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.refresh(force: false) }
+        activation = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification).sink { [weak self] _ in self?.refresh() }
     }
 
     private func request(_ action: String, id: String? = nil, completion: @escaping (Reply?) -> Void) {
+        guard action == "status" else { requestFromProcess(action, id: id, completion: completion); return }
+        // Only observational status uses HTTP. Actions keep the existing native
+        // process path and are never retried after a lost acknowledgement.
+        let url = URL(string: "http://127.0.0.1:8765/api/control/status")!
+        statusSession.dataTask(with: url) { [weak self] data, response, _ in
+            if let data = data, (response as? HTTPURLResponse)?.statusCode == 200,
+               let reply = try? JSONDecoder().decode(Reply.self, from: data), reply.ok, reply.snapshot != nil {
+                DispatchQueue.main.async { completion(reply) }
+            } else {
+                // Recovery remains usable when the web service is stopped or an
+                // older installed service has not acquired this endpoint yet.
+                self?.requestFromProcess("status", completion: completion)
+            }
+        }.resume()
+    }
+
+    private func requestFromProcess(_ action: String, id: String? = nil, completion: @escaping (Reply?) -> Void) {
         let root = Bundle.main.object(forInfoDictionaryKey: "CompanionRoot") as? String ?? ""
         let python = Bundle.main.object(forInfoDictionaryKey: "CompanionPython") as? String ?? ""
         DispatchQueue.global(qos: .userInitiated).async {
@@ -105,7 +132,7 @@ final class ControlModel: ObservableObject {
             do {
                 try process.run()
                 let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + (action == "update_locked_use" ? 150 : 30), execute: deadline)
+                DispatchQueue.global().asyncAfter(deadline: .now() + (action == "update_locked_use" ? 150 : action == "status" ? 8 : 30), execute: deadline)
                 defer { deadline.cancel() }
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
@@ -115,9 +142,10 @@ final class ControlModel: ObservableObject {
         }
     }
 
-    func refresh() {
+    func refresh(force: Bool = true) {
         statusClock = Date()
         guard !refreshing, !busy else { return }
+        guard force || statusClock >= nextStatusRead else { return }
         refreshing = true
         let generation = actionGeneration
         request("status") { [weak self] reply in
@@ -125,6 +153,8 @@ final class ControlModel: ObservableObject {
             self.refreshing = false
             guard self.actionGeneration == generation else { return }
             if let value = reply?.snapshot {
+                self.statusFailures = 0
+                self.nextStatusRead = Date().addingTimeInterval(NSApp.isActive ? 2 : 15)
                 self.snapshot = value
                 if self.statusReadFailed { self.notice = "Connection restored. Status is current."; self.error = false }
                 self.statusReadFailed = false
@@ -148,6 +178,8 @@ final class ControlModel: ObservableObject {
                     if event.status == "used" { self.notice = "Your phone is connected."; self.error = false }
                 }
             } else {
+                self.statusFailures = min(self.statusFailures + 1, 16)
+                self.nextStatusRead = Date().addingTimeInterval(StatusRetry.delay(failures: self.statusFailures, random: Double.random(in: 0...1)))
                 self.statusReadFailed = true
                 self.statusClock = Date()
                 self.notice = "Current status is unavailable. Previous readings are shown as unknown; try Refresh before choosing recovery."

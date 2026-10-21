@@ -55,7 +55,8 @@ def history_readable():
 def read_snapshot(root=ROOT):
     loaded = service.launchctl("print",service.TARGET,check=False)
     running = bool(loaded.returncode == 0 and re.search(r"^\s*state = running\s*$",loaded.stdout,re.M))
-    server = local_json("/api/status")
+    # Readiness must not enumerate active chats or wait for their owner IPC.
+    server = local_json("/api/ready")
     gateway = local_json("/api/remote/status")
     origin = RemoteSettings(root/".state"/"remote.json").origin()
     tunnel=tunnel_snapshot(root/'.state',configured=service.CONFIG.remote_enabled)

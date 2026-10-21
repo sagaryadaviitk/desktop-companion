@@ -17,6 +17,19 @@ import service
 
 
 class RecoveryTests(unittest.TestCase):
+    def setUp(self):
+        jitter=patch('service.random.random',return_value=1.0)
+        jitter.start();self.addCleanup(jitter.stop)
+
+    def test_retry_jitter_has_a_floor_and_preserves_the_failure_budget(self):
+        for random_value,expected in [(0,1.5),(.5,2.25),(1,3)]:
+            budget=service.RecoveryBudget(random_value=lambda:random_value)
+            self.assertEqual(budget.failed(100),100+expected)
+            self.assertEqual(budget.failures,1)
+        budget=service.RecoveryBudget(random_value=lambda:0)
+        self.assertEqual(budget.failed(100,78),float('inf'))
+        self.assertTrue(budget.blocked)
+
     def test_backoff_opens_after_five_rapid_failures(self):
         budget=service.RecoveryBudget();now=100
         for delay in (3,6,12,24):

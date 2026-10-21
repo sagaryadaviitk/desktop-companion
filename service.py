@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import random
 import re
 import shutil
 import signal
@@ -120,8 +121,9 @@ def start_server():
 
 class RecoveryBudget:
     """Bound rapid local failures; network retries inside cloudflared remain separate."""
-    def __init__(self,initial_delay=3,max_delay=60,max_failures=5):
+    def __init__(self,initial_delay=3,max_delay=60,max_failures=5,random_value=None):
         self.initial_delay=initial_delay;self.max_delay=max_delay;self.max_failures=max_failures
+        self.random_value=random_value or random.random
         self.reset()
 
     def reset(self):
@@ -135,7 +137,8 @@ class RecoveryBudget:
             self.failures=0
         self.started_at=None;self.failures+=1
         self.blocked=exit_code in (2,78) or self.max_failures is not None and self.failures>=self.max_failures
-        return float('inf') if self.blocked else now+min(self.max_delay,self.initial_delay*2**min(self.failures-1,16))
+        cap=min(self.max_delay,self.initial_delay*2**min(self.failures-1,16))
+        return float('inf') if self.blocked else now+cap*(.5+.5*self.random_value())
 
 
 def recovery_notice(name,budget,retry_at,now):

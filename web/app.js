@@ -1,4 +1,5 @@
 "use strict";
+let readRetryAt=0;
 const el = id => document.getElementById(id);
 let chats = [], selected = null, selectedData = null, csrf = "", refreshing = false, sending = false, lastSignature = "", currentStatus=null, pairingTimer=null;
 let messageMap = new Map(), nextBefore = null, loadedEarlier = false, loadingEarlier = false;
@@ -32,14 +33,21 @@ if(new URLSearchParams(location.search).get("embedded")==="1")document.body.clas
 const shortTime = value => value ? new Date(value).toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : "Time unavailable";
 
 async function api(path, options = {}) {
-  const version=authVersion,controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
+  const version=authVersion,controller=new AbortController(),reading=!options.method||options.method==='GET',timer=setTimeout(()=>controller.abort(),reading?8000:20000);
   try{
     const response=await fetch(path,{cache:"no-store",...options,headers:{...options.headers,'X-Companion-UI':loadedBuild},signal:controller.signal});
     if(response.status===304&&path.startsWith('/api/chat?')){if(version!==authVersion)throw new Error('The browser session changed.');return {unchanged:true,checked_at:Number(response.headers.get('X-Companion-Execution-Checked-At'))};}
     if(response.status===304&&path==='/api/chats'){if(version!==authVersion)throw new Error('The browser session changed.');return {unchanged:true};}
     const data=await response.json().catch(()=>null);
     if(version!==authVersion)throw new Error("The browser session changed. Please reconnect.");
-    if(!response.ok){if(response.status===401&&data?.auth_required)lockScreen();throw Object.assign(new Error(data?.error||data?.message||(response.status===429?"Too many attempts. Wait a moment and try again.":`Your Mac could not complete the request (${response.status}). Try again.`)),{result:data,status:response.status});}
+    if(!response.ok){
+      if(reading&&[429,503].includes(response.status)){
+        const header=response.headers.get('Retry-After'),seconds=Number(header);
+        const wait=header?(Number.isFinite(seconds)?seconds*1000:Date.parse(header)-Date.now()):0;
+        if(Number.isFinite(wait))readRetryAt=Date.now()+Math.max(0,Math.min(60000,wait));
+      }
+      if(response.status===401&&data?.auth_required)lockScreen();throw Object.assign(new Error(data?.error||data?.message||(response.status===429?"Too many attempts. Wait a moment and try again.":`Your Mac could not complete the request (${response.status}). Try again.`)),{result:data,status:response.status});
+    }
     if(!data)throw new Error("The connection returned an unexpected response. Try again.");
     if(path.startsWith('/api/chat?'))data.view_revision=response.headers.get('ETag')||'';
     return data;
@@ -83,7 +91,9 @@ function updateComposer(){
   const photoCount=(photoDrafts.get(selected)||[]).length,uploading=photoUploads.get(selected)||0;
   document.querySelector('.composer-area').classList.toggle('has-draft',Boolean(input.value.trim()||photoCount));
   el('add-photo').disabled=!available||!connected||sending||uploading>0||photoCount>=3;renderPhotoDrafts();
-  input.disabled=!available;
+  // A temporary connection failure must never prevent drafting. Sending still
+  // requires a fresh, available control channel below.
+  input.disabled=!selectedData||Boolean(selectedData.archived);
   const live=selectedData?.control?.live||{},canSteer=live.steer===true,canSend=live.send_now===true;
   if(deliveryMode==='queue'&&canSend||deliveryMode==='steer'&&!canSteer&&canSend)deliveryMode='send';
   if(deliveryMode==='send'&&!canSend)deliveryMode='queue';
@@ -95,7 +105,7 @@ function updateComposer(){
   el('mode-queue').disabled=sending;
   el('mode-queue').textContent=canSend?'Send':'Queue';
   for(const mode of ['queue','steer'])el('mode-'+mode).setAttribute('aria-pressed',String(mode==='queue'?deliveryMode!=='steer':deliveryMode==='steer'));
-  if(selectedData)el('control-status').textContent=retrying?'Check the previous request before sending a new instruction. This retry keeps its original identity and delivery mode.':deliveryMode==='steer'?'Send guidance into the active desktop turn.':deliveryMode==='send'?'Send now and start the next turn in this desktop chat.':canSteer?'Wait until the current turn finishes. Choose Steer to redirect it now.':(live.reason||'Follow-ups wait in this chat’s desktop queue.');
+  if(selectedData)el('control-status').textContent=!connected?'You can keep drafting. Reconnect to send your message.':!available?(selectedData.control.reason||'Sending is unavailable. You can keep drafting.'):retrying?'Check the previous request before sending a new instruction. This retry keeps its original identity and delivery mode.':deliveryMode==='steer'?'Send guidance into the active desktop turn.':deliveryMode==='send'?'Send now and start the next turn in this desktop chat.':canSteer?'Wait until the current turn finishes. Choose Steer to redirect it now.':(live.reason||'Follow-ups wait in this chat’s desktop queue.');
   el('connect-chat').hidden=!available||!connected||live.connected===true||live.model_selection===true;el('connect-chat').disabled=connectingChat||sending;
   const model=live.model||selectedData?.details?.model;
   const modelName=(currentStatus?.models||[]).find(item=>item.id===model)?.name||model;
@@ -455,7 +465,7 @@ function renderPanels(data){
   if(signature===panelSignature)return;panelSignature=signature;
   const positions=["activity-panel","changes-panel","details-panel"].map(id=>[id,el(id).scrollTop]);
   const text=(tag,value,className)=>{const item=document.createElement(tag);item.textContent=value;if(className)item.className=className;return item;};
-  const activity=el("activity-panel");activity.replaceChildren(text("h3","Recorded activity"),text("p","Updates every five seconds. These are saved events from your Mac; a working status is not a live process check.","panel-help"));
+  const activity=el("activity-panel");activity.replaceChildren(text("h3","Recorded activity"),text("p","Updates automatically while this chat is open. These are saved events from your Mac; live working status is checked separately.","panel-help"));
   const turn=data.last_recorded_turn;
   if(turn){const card=text("div",recordedLabels[turn.status]||turn.status,"turn-status "+turn.status);activity.append(card);}
   for(const plan of data.plans||[]){const card=document.createElement("div");card.className="plan-card";card.append(text("h4","Saved plan"));ChatMarkdown.render(card,plan.text);activity.append(card);}
@@ -608,6 +618,7 @@ async function readCurrentChat() {
       renderMessages();if(conversationNeedsScroll&&activeView==='conversation')jumpLatest();return true;
     }
     conversationRevision=data.view_revision||'';selectedData=data;
+    if(connected)showNotice('');
     if(data.control.live?.execution&&currentStatus){currentStatus.execution=currentStatus.execution||{};currentStatus.execution[id]=data.control.live.execution;}
     renderQuestions();
     renderPanels(data);
@@ -620,7 +631,7 @@ async function readCurrentChat() {
     el("activity").textContent=`${status} · Updated ${shortTime(latest)}`;
     const available=data.control.available;
     el("control-status").textContent=available?(deliveryMode==='steer'?(data.control.live?.steer?'Send a correction to the active turn.':data.control.live?.reason||'Steering is unavailable. Choose Queue to send later.'):'Follow-ups wait in this chat’s desktop queue.'):data.control.reason;
-    el("instruction").placeholder=available?"Message or paste a photo…":"Instructions are currently unavailable";
+    el("instruction").placeholder=available?"Message or paste a photo…":"Draft a message…";
     const signature=JSON.stringify([data.pending_instructions,data.control.live?.queue_steer,data.queue_recovery,[...queueSteering]]);
     if(signature!==pendingSignature){pendingSignature=signature;el("pending").replaceChildren();
       const queued=queueUI.render(data);if(queued)el('pending').append(queued);
@@ -637,7 +648,16 @@ async function readCurrentChat() {
     scheduleMarkViewed();
     if(el('model-dialog').open)renderModelDialog();
     return true;
-  }catch(error){if(id===selected&&version===selectionVersion&&request===chatRequestVersion){selectedData=null;conversationRevision='';displayedRevision=null;renderQuestions();renderMessages();updateComposer();el("control-status").textContent=error.message;showNotice(`This chat could not refresh. ${error.message}`);}return false;}
+  }catch(error){if(id===selected&&version===selectionVersion&&request===chatRequestVersion){
+    if(selectedData)selectedData={...selectedData,control:{...selectedData.control,available:false,reason:'Reconnecting. Your draft is kept; sending resumes after a fresh check.',live:{connected:false,execution:{status:'unknown'}}}};
+    conversationRevision='';displayedRevision=null;
+    if(currentStatus?.execution)currentStatus.execution[id]={status:'unknown'};
+    el('activity').textContent='Reconnecting · showing the last saved update';
+    if(selectedData)renderPanels(selectedData);
+    renderQuestions();renderMessages();updateComposer();
+    el("control-status").textContent='Reconnecting. Your draft is kept; sending resumes after a fresh check.';
+    showNotice(`Showing the last conversation update. ${error.message}`);
+  }return false;}
 }
 
 async function refreshAll(force=false,skipChat=false){
@@ -800,12 +820,15 @@ el('connect-chat').addEventListener('click',async()=>{if(connectingChat||!select
 if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>photoStorageBusy||approvalUI?.busy()||sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else if(document.body.classList.contains('home-open')||!selected)showNotice(message);else showCommandResult(message);}});
 el('app-reload').addEventListener('click',()=>updater?.reload());
 window.addEventListener('pageshow',event=>{if(event.persisted&&!document.body.classList.contains('signed-out'))refreshAll(true);});
-document.addEventListener("visibilitychange",()=>{if(!document.hidden&&!document.body.classList.contains("signed-out")){scheduleMarkViewed();if(document.body.classList.contains("booting"))initialize();else refreshAll();}});
-window.addEventListener("online",()=>{if(document.body.classList.contains("booting"))initialize();else if(!document.body.classList.contains("signed-out"))refreshAll();});
-const pollingEnabled=()=>!document.hidden&&!document.body.classList.contains('signed-out');
-CompanionConversation.poll({enabled:pollingEnabled,read:()=>document.body.classList.contains('booting')?initialize():refreshAll(false,true),delay:()=>inConversation()?15000:5000});
-CompanionConversation.poll({enabled:()=>pollingEnabled()&&Boolean(selected)&&!document.body.classList.contains('home-open'),read:refreshChat,delay:()=>sending||deliveryReceipts.list(selected).length||CompanionConversation.working(selectedData?.control?.live?.execution,connected)?1500:5000});
+function wakeReads(){workspacePoll.wake();conversationPoll.wake();}
+function pauseReads(){workspacePoll.pause();conversationPoll.pause();}
+document.addEventListener("visibilitychange",()=>{if(document.hidden)pauseReads();else if(!document.body.classList.contains("signed-out")){scheduleMarkViewed();wakeReads();}});
+window.addEventListener('online',wakeReads);
+window.addEventListener('offline',pauseReads);
+const pollingEnabled=()=>!document.hidden&&navigator.onLine!==false&&!document.body.classList.contains('signed-out');
+const workspacePoll=CompanionConversation.poll({enabled:pollingEnabled,read:()=>document.body.classList.contains('booting')?initialize():refreshAll(false,true),delay:()=>inConversation()?15000:5000,retryAfter:()=>Math.max(0,readRetryAt-Date.now())});
+const conversationPoll=CompanionConversation.poll({enabled:()=>pollingEnabled()&&Boolean(selected)&&!document.body.classList.contains('home-open'),read:refreshChat,delay:()=>sending||deliveryReceipts.list(selected).length||CompanionConversation.working(selectedData?.control?.live?.execution,connected)?750:3000,retryAfter:()=>Math.max(0,readRetryAt-Date.now())});
 function mediaReturn(){const id=new URLSearchParams(location.search).get('media');return /^[a-z0-9][a-z0-9-]{0,79}$/.test(id||'')?'/media?item='+id:null;}
-async function initialize(){if(starting)return;starting=true;el("startup-retry").hidden=true;try{const auth=await api("/api/auth/status");if(auth.authenticated){if(mediaReturn()){location.assign(mediaReturn());return;}await refreshAll();}else lockScreen();}catch(error){el("startup-message").textContent=error.message;el("startup-retry").hidden=false;}finally{starting=false;}}
+async function initialize(){if(starting)return;starting=true;el("startup-retry").hidden=true;try{const auth=await api("/api/auth/status");if(auth.authenticated){if(mediaReturn()){location.assign(mediaReturn());return;}return await refreshAll();}else lockScreen();}catch(error){el("startup-message").textContent=error.message;el("startup-retry").hidden=false;return false;}finally{starting=false;}}
 el("startup-retry").addEventListener("click",initialize);
 initialize();

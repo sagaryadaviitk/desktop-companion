@@ -24,3 +24,11 @@ enum StatusFreshness {
         return checkedAt.isFinite && now - checkedAt >= -2 && now - checkedAt <= 20
     }
 }
+
+enum StatusRetry {
+    // Equal jitter avoids synchronized retries without a near-zero busy loop.
+    static func delay(failures: Int, random: Double) -> Double {
+        let cap = min(30.0, pow(2.0, Double(max(0, min(failures - 1, 10)))))
+        return cap * (0.5 + max(0, min(1, random)) * 0.5)
+    }
+}

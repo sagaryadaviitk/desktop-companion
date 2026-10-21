@@ -162,11 +162,27 @@ class GatewayTests(unittest.TestCase):
 
     def test_anonymous_reads_and_commands_never_reach_history_or_bridge(self):
         with patch.object(self.history,"list_threads") as read, patch.object(self.remote.bridge,"send") as send, patch("companion.cached_power_state") as power_read:
-            for path in ["/api/chats","/api/chat?id="+CHAT,"/api/status","/api/components","/api/devices","/api/photos/"+'a'*32]:
+            for path in ["/api/chats","/api/chat?id="+CHAT,"/api/status","/api/ready","/api/control/status","/api/components","/api/devices","/api/photos/"+'a'*32]:
                 self.assertEqual(self.request(path)[0],401)
             for path in ['/api/command','/api/read-state','/api/model','/api/questions/answer','/api/queue/steer','/api/queue/recovery/dismiss','/api/photos','/api/photos/remove']:
                 self.assertEqual(self.request(path,"POST",{"thread_id":CHAT,"message":"hello"})[0],401)
         read.assert_not_called();send.assert_not_called();power_read.assert_not_called()
+
+    def test_native_snapshot_stays_local_and_invalidates_after_authenticated_posts(self):
+        self.local.reads.clear();self.addCleanup(self.local.reads.clear)
+        cookie,_=self.pair()
+        self.assertEqual(self.request('/api/control/status',cookie=cookie)[0],404)
+        with patch('control.read_snapshot',return_value={'checked_at':123,'devices':[]} ) as read:
+            first=self.request('/api/control/status',local=True)
+            self.assertEqual(first[0],200)
+            self.assertEqual(json.loads(first[2])['snapshot']['checked_at'],123)
+            self.request('/api/control/status',local=True);self.assertEqual(read.call_count,1)
+            self.request('/api/queue/recovery/dismiss','POST',{},headers={'X-Companion-CSRF':self.local.csrf},local=True)
+            self.request('/api/control/status',local=True);self.assertEqual(read.call_count,2)
+
+    def test_readiness_does_not_wait_for_catalog_or_execution(self):
+        with patch.object(self.history,'active_candidates',side_effect=AssertionError('expensive read')):
+            self.assertEqual(self.request('/api/ready',local=True)[0],200)
 
     def test_login_shell_has_no_conversation_text(self):
         response = self.request("/")

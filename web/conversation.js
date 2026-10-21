@@ -23,14 +23,23 @@ window.CompanionConversation={
   const age=now-execution?.checked_at;
   return connected&&execution?.status==='working'&&typeof execution.turn_id==='string'&&Boolean(execution.turn_id)&&Number.isFinite(age)&&age>=-1000&&age<=15000;
  },
- poll({read,enabled,delay,setTimer=setTimeout,clearTimer=clearTimeout}){
-  let stopped=false,timer=null,running=false;
-  async function tick(){timer=null;if(stopped||running)return;running=true;
-   try{if(enabled())await read();}catch(_){/* The read path reports its own connection state. */}
-   finally{running=false;if(!stopped)timer=setTimer(tick,delay());}
+ poll({read,enabled,delay,retryAfter=()=>0,random=Math.random,setTimer=setTimeout,clearTimer=clearTimeout}){
+  let stopped=false,paused=false,timer=null,running=false,failures=0,wakePending=false;
+  function schedule(ms){clearTimer(timer);if(!stopped&&!paused)timer=setTimer(tick,ms);}
+  async function tick(){timer=null;if(stopped||paused||running)return;running=true;
+   try{if(enabled()){const result=await read();failures=result===false?Math.min(failures+1,16):0;}}
+   catch(_){failures=Math.min(failures+1,16);/* Reads report connection state; mutations never enter this scheduler. */}
+   finally{
+    running=false;
+    const cap=Math.min(30000,1000*2**Math.max(0,failures-1));
+    const wait=failures?cap*(.5+random()*.5):delay();
+    schedule(Math.max(wakePending?0:wait,retryAfter()));wakePending=false;
+   }
   }
-  timer=setTimer(tick,delay());
-  return {stop(){stopped=true;clearTimer(timer);}};
+  schedule(delay());
+  return {wake(){if(stopped)return;paused=false;failures=0;if(running)wakePending=true;else schedule(Math.max(0,retryAfter()));},
+          pause(){paused=true;wakePending=false;clearTimer(timer);},
+          stop(){stopped=true;clearTimer(timer);}};
  },
  scroller(panel,{changed=()=>{},frame=requestAnimationFrame,Resize=window.ResizeObserver,Mutation=window.MutationObserver}={}){
   let following=true,scheduled=false,adjusting=false;
