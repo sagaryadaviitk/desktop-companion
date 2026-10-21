@@ -222,7 +222,7 @@ The OpenAI Locked Use component can be current and enabled while an automatic un
 
 ## Independent local assistant
 
-The phone menu's **Local assistant** opens a separate Exo-backed chat area for light work, selected saved skills, read-only workspace files and authenticated API diagnostics. Local conversations never modify existing cloud chats or their model settings. Configure Exo, skill roots and private API profiles independently on each Mac; this feature defaults to disabled. See [local setup, office authentication and limits](LOCAL_ASSISTANT.md).
+**Local chats** in Companion’s sidebar, home screen and Mac control app opens the same Exo-backed history on Mac and phone. Use **Chat options → Fork & continue locally** on a desktop conversation to review a bounded copy of its completed visible text. The branch stays separate and does not replay earlier actions or alter the source chat. Local chats support light work, selected saved skills, read-only workspace files and authenticated API diagnostics. Codex’s native project name does not enforce an Exo provider, and these Companion chats do not appear in the native Codex or Exo browser chat lists. Configure Exo, skill roots and private API profiles independently on each Mac; this feature defaults to disabled. See [local setup, office authentication and limits](LOCAL_ASSISTANT.md).
 
 ## Architecture and safety boundaries
 

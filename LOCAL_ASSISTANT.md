@@ -1,6 +1,10 @@
 # Independent local assistant
 
-Open **Local assistant** in the phone menu, or visit `/local` at this Mac's usual Companion address. This is a separate conversation area backed by Exo and Companion-owned storage. It never loads, switches, summarizes, appends to, or modifies a cloud-backed Codex chat. Cloud chat history and saved skills remain read-only.
+Open **Local chats** from Companion’s sidebar or home screen, or visit `/local` at this Mac’s usual Companion address. The Mac control app also has a **Local chats** destination showing the same history as the paired phone. Chats are backed by Exo and Companion-owned storage. They do not appear in Exo’s separate browser chat list or in Codex’s native sidebar. Saved skills and original cloud chat history remain read-only.
+
+To branch a desktop conversation, open its **Chat options → Fork & continue locally**. Review the completed visible text before creating the local branch. The copy is limited to 40 messages and 12,000 characters; unfinished turns, progress, photos, tools and reasoning are omitted. The preview explains when text was left out. Creation does not start inference. Send a new local instruction to continue. The source chat remains unchanged, and the local branch retains an origin link. If the source changes after preview, review it again before creating.
+
+A Codex project name does not enforce a local model provider. The installed desktop’s ordinary new-chat action inherits its normal provider; provider settings in project-local `.codex/config.toml` are ignored. Do not change global cloud defaults or assume that moving a chat into a project switches its execution to Exo.
 
 The first version supports text chat, up to three selected local skills, reading those skills' text references, read-only files in a selected workspace, and authenticated API calls. It does not run shell commands, edit project files, operate browsers, or inherit hosted tools/connectors. A skill that needs one of those capabilities must report the missing dependency. Model output still needs human judgment; skill availability does not establish the model can complete the entire workflow.
 

@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC_FILES={'/':('index.html','text/html'),'/style.css':('style.css','text/css'),'/theme.css':('theme.css','text/css'),
               '/local':('local.html','text/html'),'/local/':('local.html','text/html'),'/local.css':('local.css','text/css'),'/local.js':('local.js','text/javascript'),
               '/media':('media.html','text/html'),'/media/':('media.html','text/html'),'/media.css':('media.css','text/css'),
-              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation','shell','approvals','media')}}
+              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation','shell','approvals','media','local_entry')}}
 def web_build():
     digest=hashlib.sha256()
     for path in sorted((ROOT/'web').glob('*')):
@@ -383,6 +383,71 @@ class History:
         thread["details"]={"model":redact(row["model"] or "Unknown"),"reasoning_effort":redact(row['reasoning_effort'] or ''),"branch":redact(row["git_branch"] or ""),"folder":redact(row["cwd"] or ""),"history_source":"Local desktop history"}
         thread["activity"],thread["plans"],thread["changes"]=self.public_activity(activity_rows)
         return thread
+
+    def local_fork_snapshot(self, thread_id):
+        """Read completed public text for an independent local copy.
+
+        Each item belongs to its nearest preceding native turn ordinal. Turn
+        state and selected items are read in one transaction, so an active or
+        failed turn cannot enter the copy through a separate status check.
+        No photo resolver, activity reader, native control, or provider is used.
+        """
+        if not isinstance(thread_id, str) or not THREAD_ID.fullmatch(thread_id):
+            raise KeyError(thread_id)
+        with readonly_db(self.state) as connection:
+            row = connection.execute('SELECT name,title FROM threads WHERE id=?', (thread_id,)).fetchone()
+        if row is None:
+            raise KeyError(thread_id)
+        title = redact(row['name'] or row['title'] or 'Untitled chat')[:300]
+        with readonly_db(self.history) as connection:
+            connection.execute('BEGIN')
+            turn = connection.execute('SELECT turn_id,status,started_at,completed_at,rollout_ordinal FROM thread_turns '
+                                      'WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1', (thread_id,)).fetchone()
+            omitted_incomplete = connection.execute('SELECT 1 FROM thread_turns WHERE thread_id=? '
+                                                     "AND (status IS NULL OR status<>'completed') LIMIT 1", (thread_id,)).fetchone() is not None
+            rows = connection.execute('''
+                SELECT i.item_type,i.item_json,i.rollout_ordinal
+                FROM thread_items i
+                WHERE i.thread_id=? AND i.item_type IN ('userMessage','agentMessage')
+                  AND (SELECT t.status FROM thread_turns t
+                       WHERE t.thread_id=i.thread_id AND t.rollout_ordinal<=i.rollout_ordinal
+                       ORDER BY t.rollout_ordinal DESC LIMIT 1)='completed'
+                ORDER BY i.rollout_ordinal DESC LIMIT 121
+            ''', (thread_id,)).fetchall()
+        older = len(rows) > 120
+        rows = rows[:120]
+        messages = []
+        for item in reversed(rows):
+            try:
+                value = json.loads(item['item_json'])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            if item['item_type'] == 'userMessage':
+                if is_scheduled_input(value):
+                    continue
+                parts = value.get('content', [])
+                if not isinstance(parts, list):
+                    continue
+                text = '\n'.join(part['text'] for part in parts if isinstance(part, dict)
+                                 and part.get('type') == 'text' and isinstance(part.get('text'), str))
+                text = visible_user_text(text)
+                role = 'user'
+            else:
+                text = value.get('text')
+                role = 'assistant'
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if text.lstrip().startswith(('<external_codex_apps_open_page>', '# AGENTS.md instructions')):
+                continue
+            messages.append({'role': role, 'phase': value.get('phase', ''),
+                             'text': redact(text), 'ordinal': item['rollout_ordinal'], 'status': 'completed'})
+        return {'id': thread_id, 'title': title, 'messages': messages,
+                'last_recorded_turn': dict(turn) if turn else None,
+                'fork_completed_only': True,
+                'fork_omitted_incomplete': omitted_incomplete,
+                'next_before': rows[-1]['rollout_ordinal'] if older and rows else None}
 
     @staticmethod
     def public_activity(rows):
@@ -812,6 +877,10 @@ class Handler(BaseHTTPRequestHandler):
                     if parsed.path=='/api/local/chats':return self.reply(200,{'chats':[]})
                     return self.reply(409,{'error':self.server.local_error})
                 if parsed.path=='/api/local/chats':return self.reply(200,assistant.chats())
+                if parsed.path=='/api/local/fork-preview':
+                    identities=parse_qs(parsed.query).get('source_chat_id',[])
+                    if len(identities)!=1:raise LocalError('Choose one desktop chat to preview.')
+                    return self.reply(200,assistant.fork_preview(self.server.history.local_fork_snapshot(identities[0])))
                 if parsed.path=='/api/local/chat':
                     identities=parse_qs(parsed.query).get('id',[])
                     if len(identities)!=1:raise LocalError('Choose one local chat.')
@@ -944,6 +1013,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.server.local_assistant:return self.reply(409,{'error':'Local chats are unavailable in this viewer.'})
                 payload=self.read_payload()
                 if self.path=='/api/local/chats':return self.reply(200,self.server.local_assistant.create(payload))
+                if self.path=='/api/local/fork':
+                    return self.reply(200,self.server.local_assistant.fork(payload,lambda:self.server.history.local_fork_snapshot(payload.get('source_chat_id'))))
                 if self.path=='/api/local/message':return self.reply(202,self.server.local_assistant.send(payload))
                 if self.path=='/api/local/archive':return self.reply(200,self.server.local_assistant.archive(payload))
                 return self.reply(404,{'error':'Unknown local route.'})

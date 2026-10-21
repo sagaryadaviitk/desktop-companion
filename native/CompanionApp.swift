@@ -64,6 +64,7 @@ struct Reply: Decodable {
 
 final class ControlModel: ObservableObject {
     let conversations = ConversationSession()
+    let localConversations = ConversationSession(initialURL: CompanionWebNavigation.localChats)
     @Published var page = "overview"
     @Published var showRestartDesktop = false
     @Published var snapshot: Snapshot?
@@ -94,6 +95,11 @@ final class ControlModel: ObservableObject {
     } }
 
     init() {
+        conversations.onOpenLocal = { [weak self] url in
+            guard let self = self else { return }
+            self.localConversations.open(url)
+            self.page = "local"
+        }
         refresh()
         timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect().sink { [weak self] _ in self?.refresh(force: false) }
         activation = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification).sink { [weak self] _ in self?.refresh() }
@@ -276,35 +282,102 @@ final class ControlModel: ObservableObject {
 
 final class ConversationSession: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
     @Published var failed = false
-    private let initial = URL(string: "http://127.0.0.1:8765/?embedded=1")!
+    @Published var loading = false
+    var onOpenLocal: ((URL) -> Void)?
+    private let initial: URL
+    private var lastRequested: URL
+    private var hasLoaded = false
+    init(initialURL: URL = CompanionWebNavigation.conversations) {
+        initial = initialURL
+        lastRequested = initialURL
+        super.init()
+    }
     lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = self
         view.uiDelegate = self
-        view.load(URLRequest(url: initial))
         return view
     }()
-    func reload() { failed = false; webView.load(URLRequest(url: webView.url ?? initial)) }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { failed = false }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed = true }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed = true }
+    func startIfNeeded() { if !hasLoaded { open(initial) } }
+    func open(_ url: URL) {
+        guard let target = CompanionWebNavigation.embedded(url) else { return }
+        hasLoaded = true
+        lastRequested = target
+        if failed { failed = false }
+        webView.load(URLRequest(url: target, timeoutInterval: 15))
+    }
+    func reload() { open(failed ? lastRequested : webView.url ?? lastRequested) }
+    func refreshLocal() {
+        if failed || !hasLoaded || webView.url == nil { reload(); return }
+        guard !loading, let url = webView.url, CompanionWebNavigation.isLocalChat(url) else { return }
+        // The page's observational refresh keeps drafts and pending requests.
+        // This fixed DOM action exposes no native command or script interface.
+        webView.evaluateJavaScript("document.getElementById('local-refresh')?.click();", completionHandler: nil)
+    }
+    func openInBrowser() {
+        if let target = CompanionWebNavigation.browserURL(webView.url ?? lastRequested) { NSWorkspace.shared.open(target) }
+    }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { loading = true }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { failed = false; loading = false }
+    private func navigationFailed(_ error: Error) {
+        guard (error as NSError).code != NSURLErrorCancelled else { return }
+        failed = true
+        loading = false
+    }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { navigationFailed(error) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { navigationFailed(error) }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { failed = true; loading = false }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-        if url.scheme == "http" && url.host == "127.0.0.1" && url.port == 8765 { decisionHandler(.allow); return }
-        if ["https", "http"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
+        if CompanionWebNavigation.isTrusted(url) {
+            if navigationAction.targetFrame?.isMainFrame != false, CompanionWebNavigation.isLocalChat(url), let openLocal = onOpenLocal {
+                openLocal(url)
+                decisionHandler(.cancel)
+                return
+            }
+            if navigationAction.targetFrame?.isMainFrame == true { lastRequested = url }
+            decisionHandler(.allow)
+            return
+        }
+        // Only an explicit clicked link opens a browser. Redirects, frames and
+        // script navigation cannot place external content in this local view.
+        if navigationAction.navigationType == .linkActivated && CompanionWebNavigation.canOpenInBrowser(url) { NSWorkspace.shared.open(url) }
         decisionHandler(.cancel)
     }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        guard let url = navigationResponse.response.url, CompanionWebNavigation.isTrusted(url) else { decisionHandler(.cancel); return }
+        if navigationResponse.isForMainFrame, let response = navigationResponse.response as? HTTPURLResponse, response.statusCode >= 400 {
+            failed = true
+            loading = false
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url, ["https", "http"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
+        guard let url = navigationAction.request.url else { return nil }
+        if CompanionWebNavigation.isTrusted(url) {
+            if CompanionWebNavigation.isLocalChat(url), let openLocal = onOpenLocal { openLocal(url) }
+            else { open(url) }
+        } else if navigationAction.navigationType == .linkActivated && CompanionWebNavigation.canOpenInBrowser(url) { NSWorkspace.shared.open(url) }
         return nil
+    }
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        guard let url = frame.request.url, CompanionWebNavigation.isTrusted(url), let window = webView.window else { completionHandler(false); return }
+        let alert = NSAlert()
+        alert.messageText = "Confirm in Desktop Companion"
+        alert.informativeText = String(message.prefix(4000)) + "\n\nRequested by Companion on this Mac (127.0.0.1:8765)."
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in completionHandler(response == .alertFirstButtonReturn) }
     }
 }
 
 struct ConversationWebView: NSViewRepresentable {
     let session: ConversationSession
-    func makeNSView(context: Context) -> WKWebView { session.webView }
+    func makeNSView(context: Context) -> WKWebView { session.startIfNeeded(); return session.webView }
     func updateNSView(_ view: WKWebView, context: Context) { view.appearance = NSAppearance(named: context.environment.colorScheme == .dark ? .darkAqua : .aqua) }
 }
 
@@ -320,6 +393,41 @@ struct ConversationPane: View {
                     Text("Check the service in Overview, then reload this view.").font(.system(size: 12)).foregroundStyle(.secondary)
                     Button("Reload conversations") { session.reload() }.controlSize(.large)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity).background(canvas)
+            }
+        }
+    }
+}
+
+struct LocalChatsPane: View {
+    @ObservedObject var session: ConversationSession
+    let showOverview: () -> Void
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: "sparkles").font(.system(size: 19)).foregroundStyle(CompanionTheme.action)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Local chats").font(.system(size: 17, weight: .semibold))
+                    Text("On this Mac · the same chats as your phone").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if session.loading { ProgressView().controlSize(.small).accessibilityLabel("Loading local chats") }
+                Button("Open in browser") { session.openInBrowser() }
+                Button("Refresh") { session.refreshLocal() }.disabled(session.loading)
+            }.font(.system(size: 11)).padding(.horizontal, 22).padding(.vertical, 16).background(CompanionTheme.surface)
+            ZStack {
+                ConversationWebView(session: session)
+                if session.failed {
+                    VStack(spacing: 16) {
+                        Image(systemName: "desktopcomputer.trianglebadge.exclamationmark").font(.system(size: 34)).foregroundStyle(CompanionTheme.action)
+                        Text("Local chats are unavailable right now").font(.system(size: 19, weight: .semibold))
+                        Text("Your saved chats stay on this Mac. Check the desktop service in Overview, then try again.")
+                            .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 390)
+                        HStack(spacing: 12) {
+                            Button("Check Overview", action: showOverview).companionControl()
+                            Button("Try again") { session.reload() }.companionControl(prominent: true)
+                        }.controlSize(.large)
+                    }.padding(35).frame(maxWidth: .infinity, maxHeight: .infinity).background(canvas)
+                }
             }
         }
     }
@@ -377,7 +485,9 @@ struct ControlView: View {
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-            if page == "chats" {
+            if page == "local" {
+                LocalChatsPane(session: model.localConversations) { model.page = "overview" }
+            } else if page == "chats" {
                 VStack(spacing: 0) {
                     HStack(spacing: 12) {
                         Text("Conversations").font(.system(size: 16, weight: .semibold))
@@ -430,6 +540,7 @@ struct ControlView: View {
             }.padding(.top, 20).padding(.bottom, 4)
             VStack(spacing: 7) {
                 navButton("Overview", icon: "square.grid.2x2", value: "overview")
+                navButton("Local chats", icon: "sparkles", value: "local")
                 navButton("Conversations", icon: "bubble.left.and.bubble.right", value: "chats")
                 navButton("Unattended mode", icon: "moon.zzz", value: "power")
                 navButton("Phone access", icon: "iphone", value: "phone")

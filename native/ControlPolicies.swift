@@ -32,3 +32,35 @@ enum StatusRetry {
         return cap * (0.5 + max(0, min(1, random)) * 0.5)
     }
 }
+
+enum CompanionWebNavigation {
+    static let conversations = URL(string: "http://127.0.0.1:8765/?embedded=1")!
+    static let localChats = URL(string: "http://127.0.0.1:8765/local?embedded=1")!
+
+    static func isTrusted(_ url: URL) -> Bool {
+        url.scheme == "http" && url.host == "127.0.0.1" && url.port == 8765 &&
+        url.user == nil && url.password == nil
+    }
+
+    static func isLocalChat(_ url: URL) -> Bool {
+        isTrusted(url) && (url.path == "/local" || url.path.hasPrefix("/local/"))
+    }
+
+    static func canOpenInBrowser(_ url: URL) -> Bool {
+        ["http", "https"].contains(url.scheme ?? "") && url.host != nil &&
+        url.user == nil && url.password == nil
+    }
+
+    static func embedded(_ url: URL) -> URL? {
+        guard isTrusted(url), var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        parts.queryItems = (parts.queryItems ?? []).filter { $0.name != "embedded" } + [URLQueryItem(name: "embedded", value: "1")]
+        return parts.url
+    }
+
+    static func browserURL(_ url: URL) -> URL? {
+        guard isTrusted(url), var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        let items = (parts.queryItems ?? []).filter { $0.name != "embedded" }
+        parts.queryItems = items.isEmpty ? nil : items
+        return parts.url
+    }
+}
