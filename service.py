@@ -3,6 +3,7 @@
 
 import argparse
 import fcntl
+import errno
 import hashlib
 import json
 import os
@@ -119,8 +120,8 @@ def start_server():
 
 class RecoveryBudget:
     """Bound rapid local failures; network retries inside cloudflared remain separate."""
-    def __init__(self,initial_delay=3,max_delay=60):
-        self.initial_delay=initial_delay;self.max_delay=max_delay
+    def __init__(self,initial_delay=3,max_delay=60,max_failures=5):
+        self.initial_delay=initial_delay;self.max_delay=max_delay;self.max_failures=max_failures
         self.reset()
 
     def reset(self):
@@ -133,8 +134,8 @@ class RecoveryBudget:
         if self.started_at is not None and now-self.started_at>=60:
             self.failures=0
         self.started_at=None;self.failures+=1
-        self.blocked=exit_code in (2,78) or self.failures>=5
-        return float('inf') if self.blocked else now+min(self.max_delay,self.initial_delay*2**(self.failures-1))
+        self.blocked=exit_code in (2,78) or self.max_failures is not None and self.failures>=self.max_failures
+        return float('inf') if self.blocked else now+min(self.max_delay,self.initial_delay*2**min(self.failures-1,16))
 
 
 def recovery_notice(name,budget,retry_at,now):
@@ -160,8 +161,9 @@ def recover_process(children,name,starter,retry_at,now,budget,restart=False):
     if not process and not budget.blocked and now>=retry_at:
         try:
             children[name]=starter()
-        except OSError:
-            retry_at=budget.failed(now)
+        except OSError as error:
+            repair_code=78 if error.errno in (errno.ENOENT,errno.ENOTDIR,errno.EACCES,errno.ENOEXEC) else None
+            retry_at=budget.failed(now,repair_code)
             recovery_notice(name,budget,retry_at,now)
         else:
             budget.started(now)
@@ -183,7 +185,7 @@ def recover_awake(children,retry_at,now,budget):
 
 
 def recover_tunnel(children,retry_at,now,reconnect=False,reason='network_changed',budget=None):
-    budget=budget if budget is not None else RecoveryBudget(initial_delay=30,max_delay=300)
+    budget=budget if budget is not None else RecoveryBudget(initial_delay=30,max_delay=300,max_failures=None)
     process=children.get('tunnel')
     if reconnect and reason=='network_changed' and process and process.poll() is None:
         record_event(STATE,'network_change_preserved',supervisor_pid=os.getpid(),controller_pid=process.pid,reason=reason)
@@ -211,8 +213,9 @@ def recover_tunnel(children,retry_at,now,reconnect=False,reason='network_changed
     if not process and not budget.blocked and now>=retry_at:
         try:
             children['tunnel']=start_tunnel()
-        except OSError:
-            retry_at=budget.failed(now)
+        except OSError as error:
+            repair_code=78 if error.errno in (errno.ENOENT,errno.ENOTDIR,errno.EACCES,errno.ENOEXEC) else None
+            retry_at=budget.failed(now,repair_code)
             publish(STATE,'failed' if budget.blocked else 'retrying',
                     **({} if budget.blocked else {'retry_at':time.time()+retry_at-now}),
                     reason='controller_repair_required' if budget.blocked else 'startup_failed')
@@ -309,7 +312,7 @@ def supervise():
             now=time.monotonic()
             server_budget=RecoveryBudget();server_budget.started(now)
             awake_budget=RecoveryBudget()
-            tunnel_budget=RecoveryBudget(initial_delay=30,max_delay=300)
+            tunnel_budget=RecoveryBudget(initial_delay=30,max_delay=300,max_failures=None)
             awake_retry_at=recover_awake(children,0,now,awake_budget)
             tunnel_retry_at=0
             if CONFIG.remote_enabled:

@@ -1,5 +1,6 @@
 """Recovery isolation and explicit installation. All processes/files are test fixtures."""
 import contextlib
+import errno
 import io
 import json
 import os
@@ -102,6 +103,27 @@ class RecoveryTests(unittest.TestCase):
             service.recover_tunnel(children,retry,203,budget=budget);start.assert_called_once()
         self.assertFalse(budget.blocked)
 
+    def test_network_outage_does_not_exhaust_tunnel_recovery(self):
+        budget=service.RecoveryBudget(initial_delay=30,max_delay=300,max_failures=None)
+        now=100
+        for expected in (30,60,120,240,300,300,300,300):
+            budget.started(now)
+            retry=budget.failed(now+1,1)
+            self.assertEqual(retry,now+1+expected);self.assertFalse(budget.blocked)
+            now=retry
+        # Large failure counts stay numerically bounded as well.
+        budget.failures=1000000
+        self.assertEqual(budget.failed(now,1),now+300)
+
+    def test_missing_executable_stops_only_the_affected_component_immediately(self):
+        for name in ('server','awake','tunnel'):
+            with self.subTest(component=name):
+                children={'other':Mock()};budget=service.RecoveryBudget()
+                with patch('service.write_runtime'),patch('service.stop_children') as stop:
+                    retry=service.recover_process(children,name,Mock(side_effect=OSError(errno.ENOENT,'fixture')),0,100,budget)
+                self.assertEqual(retry,float('inf'));self.assertTrue(budget.blocked)
+                self.assertEqual(set(children),{'other'});stop.assert_not_called()
+
     def test_permanent_controller_exit_is_reported_and_not_retried(self):
         failed=Mock();failed.poll.return_value=2
         budget=service.RecoveryBudget(initial_delay=30,max_delay=300)
@@ -191,9 +213,9 @@ class InstallationTests(unittest.TestCase):
             (root/'configuration.py').write_text('def load(root): raise ValueError("invalid fixture")')
             (root/'system_status.py').write_text('publish=read_record=record_event=None')
             result=subprocess.run([sys.executable,str(root/'service.py'),'run'],cwd=root,capture_output=True,text=True,timeout=5)
+            self.assertFalse((root/'.state').exists())
         self.assertEqual(result.returncode,0)
         self.assertIn('configuration is unavailable',result.stderr)
-        self.assertFalse((root/'.state').exists())
 
     def test_supervisor_initial_guard_failure_does_not_relaunch_chatgpt_or_stop_web(self):
         with tempfile.TemporaryDirectory() as directory:
