@@ -670,7 +670,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # Conversation IDs, prompts and browser secrets never enter request logs.
 
+    def invalidate_reads(self):
+        if getattr(self,"_invalidate_reads",False):
+            self.server.reads.clear()
+            self._invalidate_reads=False
+
     def reply(self, code, value, mime="application/json", extra_headers=None):
+        # Fence observational reads before the caller can consume a write reply.
+        self.invalidate_reads()
         data = json.dumps(value).encode() if mime == "application/json" else value
         self.send_response(code)
         self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith('text/') or mime=='application/json' else ''))
@@ -893,7 +900,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.valid_origin():
             return self.reply(403, {"error": "This origin is not enabled."})
-        invalidate_reads=False
+        self._invalidate_reads=False
         try:
             if self.path == "/api/auth/login" and self.server.remote:
                 payload = self.read_payload()
@@ -909,7 +916,7 @@ class Handler(BaseHTTPRequestHandler):
             csrf = session["csrf"] if session else self.server.csrf
             if not secrets.compare_digest(self.headers.get("X-Companion-CSRF", ""), csrf):
                 return self.reply(403, {"error": "Refresh this page before making changes."})
-            invalidate_reads=True
+            self._invalidate_reads=True
             client_build=self.headers.get('X-Companion-UI')
             if client_build and client_build!=web_build():
                 return self.reply(409,{'error':'Companion was updated. Reload this tab before sending. Your instruction has not been submitted.','update_required':True})
@@ -1185,7 +1192,7 @@ class Handler(BaseHTTPRequestHandler):
         except (sqlite3.Error, OSError):
             return self.reply(503, {"error": "The local command service is unavailable. Check the desktop before resending."})
         finally:
-            if invalidate_reads:self.server.reads.clear()
+            self.invalidate_reads()
 
 
 def main():
