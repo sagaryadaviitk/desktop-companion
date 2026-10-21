@@ -834,7 +834,7 @@ el('connect-chat').addEventListener('click',async()=>{
     const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});
     if(!isCurrent())return;
     showCommandResult(result.message);
-    const outcome=await CompanionConversation.waitForConnection({read:()=>refreshChat(true),isCurrent,
+    const outcome=await CompanionConversation.waitForConnection({read:()=>refreshChat(true),isCurrent,retryAfter:()=>Math.max(0,readRetryAt-Date.now()),
       isConnected:()=>selectedData?.control?.live?.connected===true||selectedData?.control?.live?.model_selection===true});
     if(!isCurrent())return;
     if(outcome==='connected')showCommandResult('Connected to desktop.',true);

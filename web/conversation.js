@@ -41,7 +41,7 @@ window.CompanionConversation={
           pause(){paused=true;wakePending=false;clearTimer(timer);},
           stop(){stopped=true;clearTimer(timer);}};
  },
- async waitForConnection({read,isConnected,isCurrent,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),random=Math.random,timeout=15000}){
+ async waitForConnection({read,isConnected,isCurrent,retryAfter=()=>0,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),random=Math.random,timeout=15000}){
   const deadline=now()+timeout;let attempts=0;
   while(isCurrent()&&now()<deadline){
    let fresh=false;try{fresh=await read()!==false;}catch(_){/* Only observational reads are retried. */}
@@ -49,7 +49,7 @@ window.CompanionConversation={
    if(fresh&&isConnected())return 'connected';
    const remaining=deadline-now();if(remaining<=0)break;
    const cap=Math.min(2000,500*2**Math.min(attempts++,3));
-   await sleep(Math.min(remaining,cap*(.5+.5*random())));
+   await sleep(Math.min(remaining,Math.max(retryAfter(),cap*(.5+.5*random()))));
   }
   return isCurrent()?'timeout':'cancelled';
  },

@@ -105,7 +105,7 @@ test('Connect opens the exact chat once and waits for verified connection; an un
  const fragment=source.slice(source.indexOf("el('connect-chat').addEventListener('click'"),source.indexOf('\nif(window.CompanionUpdates)'));
  for(const fail of [false,true]){
   let click,posts=0,reads=0,clock=0;const messages=[];
-  const ctx={el:()=>({addEventListener(_,fn){click=fn;}}),selected:'chat-A',selectionVersion:4,authVersion:2,connectingChat:false,csrf:'test',selectedData:{control:{live:{connected:false}}},updateComposer(){},showCommandResult:message=>messages.push(message),
+  const ctx={el:()=>({addEventListener(_,fn){click=fn;}}),readRetryAt:0,selected:'chat-A',selectionVersion:4,authVersion:2,connectingChat:false,csrf:'test',selectedData:{control:{live:{connected:false}}},updateComposer(){},showCommandResult:message=>messages.push(message),
    api:async(path,options)=>{posts++;assert.equal(path,'/api/chat/connect');assert.equal(JSON.parse(options.body).thread_id,'chat-A');if(fail)throw Error('Open acknowledgement lost');return {message:'Opening'};},
    refreshChat:async fresh=>{assert.equal(fresh,true);reads++;if(reads===2)ctx.selectedData.control.live.connected=true;return true;},
    CompanionConversation:{waitForConnection:options=>ui.waitForConnection({...options,now:()=>clock,sleep:async ms=>clock+=ms})}};
@@ -113,4 +113,10 @@ test('Connect opens the exact chat once and waits for verified connection; an un
   if(fail){assert.equal(reads,0);assert.match(messages.at(-1),/acknowledgement lost/);}
   else{assert.equal(reads,2);assert.equal(messages.at(-1),'Connected to desktop.');}
  }
+});
+
+test('connection confirmation respects server cooldown without exceeding its confirmation window',async()=>{
+ let clock=0,reads=0;
+ const outcome=await ui.waitForConnection({read:async()=>{reads++;return false;},isConnected:()=>false,isCurrent:()=>true,retryAfter:()=>60000,now:()=>clock,sleep:async ms=>clock+=ms});
+ assert.equal(outcome,'timeout');assert.equal(reads,1);assert.equal(clock,15000);
 });
