@@ -16,6 +16,12 @@ The native app reads status through a local-only HTTP endpoint, with a bounded p
 
 This release changes Python, Swift, web assets and supervisor behavior. Rebuild/reopen the native app and perform one coordinated supervisor restart; installations still on the older LaunchAgent definition should instead use the one-time installation action described below. Per-Mac configuration and pairing stay local.
 
+### Chat connection and large activity snapshots
+
+**Connect this chat to desktop** opens the selected chat once and waits up to 15 seconds for fresh owner confirmation, showing **Connecting…** while waiting. Opening the desktop window alone is not a connection acknowledgement. Switching chats or signing out cancels the confirmation; a failed or uncertain open is never automatically replayed.
+
+A verified, resumed desktop owner is connected even if its activity snapshot is too large or temporarily unreadable. The button disappears in that case, while activity is explicitly unknown. Queue and verified model controls remain available; Send, Steer and live approvals still require their existing fresh state checks. Oversized activity observations retain the 32 MiB frame limit and use a bounded, per-owner 30-second cooldown to avoid repeatedly serializing a huge history. This cooldown never substitutes for action preflight. This fix needs a web-service restart and a browser update; no native rebuild or tunnel restart is needed.
+
 ## Install on a second Mac
 
 The source is in the private personal repository [sagaryadaviitk/desktop-companion](https://github.com/sagaryadaviitk/desktop-companion). Each Mac runs independently; Git shares code, not chat sessions, settings, browser pairing, or credentials. The agent on the new Mac should read this section, [AGENTS.md](AGENTS.md), and [SETUP.md](SETUP.md) before installing.

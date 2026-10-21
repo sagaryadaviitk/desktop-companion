@@ -73,3 +73,44 @@ test('accepted receipts in another chat retain exact identity without indefinite
  const tick=callback();p.wake();resolve(true);await tick;assert.equal(waits.at(-1),20000);
  p.pause();await callback();assert.equal(reads,1);p.stop();
  });
+
+test('connection confirmation polls fresh reads until loaded, without reopening the desktop',async()=>{
+ let clock=0,reads=0;const waits=[];
+ const outcome=await ui.waitForConnection({read:async()=>{reads++;return true;},isConnected:()=>reads===3,isCurrent:()=>true,now:()=>clock,sleep:async ms=>{waits.push(ms);clock+=ms;},random:()=>1});
+ assert.equal(outcome,'connected');assert.equal(reads,3);assert.deepEqual(waits,[500,1000]);
+});
+test('connection confirmation has a bounded deadline and cannot confirm stale reads',async()=>{
+ let clock=0,reads=0;const waits=[];
+ const outcome=await ui.waitForConnection({read:async()=>{reads++;return false;},isConnected:()=>true,isCurrent:()=>true,now:()=>clock,sleep:async ms=>{waits.push(ms);clock+=ms;},random:()=>1,timeout:3200});
+ assert.equal(outcome,'timeout');assert.equal(clock,3200);assert.equal(reads,3);assert.ok(waits.every(ms=>ms<=2000));
+});
+test('changing chat or browser session cancels connection confirmation before another read',async()=>{
+ let current=true,reads=0;
+ const outcome=await ui.waitForConnection({read:async()=>{reads++;current=false;return true;},isConnected:()=>true,isCurrent:()=>current,now:()=>0,sleep:async()=>assert.fail('cancelled wait must not sleep')});
+ assert.equal(outcome,'cancelled');assert.equal(reads,1);
+});
+test('Connect button reflects owner connection independently of activity and shows pending feedback',()=>{
+ const source=fs.readFileSync(__dirname+'/web/app.js','utf8');
+ const fragment=source.slice(source.indexOf("  el('connect-chat').hidden="),source.indexOf('  const model=live.model'));
+ for(const [live,pending,hidden]of [[{connected:true,execution:{status:'unknown'}},false,true],[{connected:false},true,false],[{connected:false},false,false]]){
+  const button={setAttribute(name,value){this[name]=value;}};
+  vm.runInNewContext(fragment,{el:()=>button,available:true,connected:true,live,connectingChat:pending,sending:false});
+  assert.equal(button.hidden,hidden);assert.equal(button.disabled,pending);assert.equal(button['aria-busy'],String(pending));
+  assert.match(button.textContent,pending?/Connecting/:/Connect this chat/);
+ }
+});
+
+test('Connect opens the exact chat once and waits for verified connection; an uncertain open is never replayed',async()=>{
+ const source=fs.readFileSync(__dirname+'/web/app.js','utf8');
+ const fragment=source.slice(source.indexOf("el('connect-chat').addEventListener('click'"),source.indexOf('\nif(window.CompanionUpdates)'));
+ for(const fail of [false,true]){
+  let click,posts=0,reads=0,clock=0;const messages=[];
+  const ctx={el:()=>({addEventListener(_,fn){click=fn;}}),selected:'chat-A',selectionVersion:4,authVersion:2,connectingChat:false,csrf:'test',selectedData:{control:{live:{connected:false}}},updateComposer(){},showCommandResult:message=>messages.push(message),
+   api:async(path,options)=>{posts++;assert.equal(path,'/api/chat/connect');assert.equal(JSON.parse(options.body).thread_id,'chat-A');if(fail)throw Error('Open acknowledgement lost');return {message:'Opening'};},
+   refreshChat:async fresh=>{assert.equal(fresh,true);reads++;if(reads===2)ctx.selectedData.control.live.connected=true;return true;},
+   CompanionConversation:{waitForConnection:options=>ui.waitForConnection({...options,now:()=>clock,sleep:async ms=>clock+=ms})}};
+  vm.runInNewContext(fragment,ctx);await click();assert.equal(posts,1);assert.equal(ctx.connectingChat,false);
+  if(fail){assert.equal(reads,0);assert.match(messages.at(-1),/acknowledgement lost/);}
+  else{assert.equal(reads,2);assert.equal(messages.at(-1),'Connected to desktop.');}
+ }
+});

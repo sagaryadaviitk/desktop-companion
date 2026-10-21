@@ -6,8 +6,9 @@ import struct
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
-from desktop_runtime import DesktopClient, DesktopRuntime,claim_queued_message,queue_photo_message,QueueNotClaimed
+from desktop_runtime import DesktopClient, DesktopRuntime,DesktopSnapshotTooLarge,claim_queued_message,queue_photo_message,QueueNotClaimed
 from runtime import RuntimeUnavailable
 from promotions import QueuePromotions
 
@@ -55,6 +56,7 @@ class DesktopRuntimeTests(unittest.TestCase):
         self.server=socket.socket(socket.AF_UNIX);self.server.bind(str(self.path));self.path.chmod(0o600);self.server.listen();self.server.settimeout(.1)
         self.requests=[];self.error=None;self.wrong_turn=False;self.stop=False
         self.queued=True;self.fail_after_claim=False
+        self.snapshot_size=None;self.follows=0;self.resume_state='resumed'
         self.model='test-model';self.effort='high';self.live_override=None
         self.approval_requests=[];self.keep_approval=False
         self.thread={'id':'chat-1','archived':False,'last_recorded_turn':{'turn_id':'turn-1','status':'inProgress'},'details':{'folder':'/demo/project'}}
@@ -101,6 +103,9 @@ class DesktopRuntimeTests(unittest.TestCase):
                         method=request['method']
                         if method=='thread-stream-following-changed':
                             if request['params']['following']:
+                                self.follows+=1
+                                if self.snapshot_size:
+                                    connection.sendall(struct.pack('<I',self.snapshot_size));continue
                                 turn=self.live_override or self.thread['last_recorded_turn']
                                 state={'id':'chat-1','threadRuntimeStatus':{'type':'active' if turn['status']=='inProgress' else 'idle'},'turns':[{'turnId':turn['turn_id'],'status':turn['status']}], 'requests':self.approval_requests}
                                 self.send(connection,{'type':'broadcast','method':'thread-stream-state-changed','version':11,'sourceClientId':'desktop-owner','params':{'hostId':'local','conversationId':'chat-1','change':{'type':'snapshot','conversationState':state}}})
@@ -110,7 +115,7 @@ class DesktopRuntimeTests(unittest.TestCase):
                             self.send(connection,{'type':'response','requestId':request['requestId'],'resultType':'error','error':self.error});continue
                         if method=='initialize':result={'clientId':'companion-test-client'}
                         elif method=='thread-owner-discovery':result={'supportsUntrustedAppInput':True}
-                        elif method=='thread-follower-read-model-settings':result={'settings':{'resumeState':'resumed','model':self.model,'reasoningEffort':self.effort}}
+                        elif method=='thread-follower-read-model-settings':result={'settings':{'resumeState':self.resume_state,'model':self.model,'reasoningEffort':self.effort}}
                         elif method=='thread-follower-update-thread-settings':
                             settings=request['params']['threadSettings'];self.model=settings['model'];self.effort=settings.get('effort',self.effort);result={'applied':True}
                         elif method=='thread-follower-steer-turn':
@@ -136,6 +141,52 @@ class DesktopRuntimeTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_TOOL_PAYLOAD',json.dumps(value))
 
 
+
+    def test_large_snapshot_preserves_verified_connection_and_cools_down_only_observations(self):
+        self.snapshot_size=70*1024*1024;now=[0]
+        self.runtime.observation_clock=lambda:now[0]
+        for _ in range(2):
+            value=self.runtime.capabilities('chat-1')
+            self.assertTrue(value['connected']);self.assertTrue(value['model_selection'])
+            self.assertFalse(value['steer']);self.assertFalse(value['send_now'])
+            self.assertEqual(value['execution']['status'],'unknown')
+            self.assertIn('too large',value['reason'])
+        self.assertEqual(self.follows,1)
+        self.assertEqual(self.runtime.execution_state('chat-1')['status'],'unknown')
+        self.assertEqual(self.follows,1)
+        # An action still performs a fresh check, and must not submit on failure.
+        with self.assertRaises(DesktopSnapshotTooLarge):self.runtime.send_now('chat-1','Not sent')
+        self.assertEqual(self.follows,2)
+        self.assertNotIn('thread-follower-start-turn',[r['method'] for r in self.requests])
+        now[0]=31;self.snapshot_size=None
+        self.assertTrue(self.runtime.capabilities('chat-1')['steer'])
+        self.assertEqual(self.follows,3)
+
+    def test_activity_failure_does_not_erase_owner_connection_but_owner_failure_does(self):
+        with patch.object(DesktopClient,'execution_state',side_effect=TimeoutError('synthetic timeout')):
+            value=self.runtime.capabilities('chat-1')
+        self.assertTrue(value['connected']);self.assertTrue(value['model_selection'])
+        self.assertFalse(value['send_now']);self.assertFalse(value['steer'])
+        self.assertIn('temporarily unavailable',value['reason'])
+        self.error='no-owner'
+        value=self.runtime.capabilities('chat-1')
+        self.assertFalse(value['connected']);self.assertFalse(value['model_selection'])
+
+    def test_owner_with_unresumed_chat_is_not_connected(self):
+        self.resume_state='loading'
+        value=self.runtime.capabilities('chat-1')
+        self.assertFalse(value['connected']);self.assertEqual(self.follows,0)
+
+    def test_oversize_observation_cooldown_is_bounded_and_owner_specific(self):
+        class LargeClient:
+            def execution_state(self,*args,**kwargs):raise DesktopSnapshotTooLarge('too large')
+        client=LargeClient();self.runtime.observation_clock=lambda:0
+        for index in range(70):
+            with self.assertRaises(DesktopSnapshotTooLarge):self.runtime.observe_execution(client,str(index),'owner')
+        self.assertEqual(len(self.runtime.large_snapshots),64)
+        with patch.object(client,'execution_state',return_value={'status':'idle'}) as read:
+            self.assertEqual(self.runtime.observe_execution(client,'69','replacement-owner'),{'status':'idle'})
+            read.assert_called_once()
 
     def test_model_changes_use_next_turn_native_settings_and_readback_without_permissions(self):
         result=self.runtime.set_model('chat-1','another-model','medium');self.assertEqual(result['model'],'another-model')

@@ -451,6 +451,17 @@ class HttpTests(unittest.TestCase):
             execution['status']='idle';execution['turn_id']=None
             self.assertEqual(self.request(path,headers={'If-None-Match':headers['ETag']})[0],200)
 
+    def test_loaded_owner_replaces_disconnected_etag_even_when_activity_is_unavailable(self):
+        live={'connected':False,'model_selection':False}
+        runtime=SimpleNamespace(capabilities=lambda _:dict(live))
+        path='/api/chat?id='+CHAT
+        with patch.object(self.server,'runtime',runtime),patch.object(self.server.bridge,'describe',return_value={'available':True}):
+            code,headers,_=self.request(path);self.assertEqual(code,200)
+            live.update(connected=True,model_selection=True,execution={'status':'unknown','turn_id':None,'checked_at':1000})
+            code,fresh,body=self.request(path,headers={'If-None-Match':headers['ETag']})
+            self.assertEqual(code,200);self.assertNotEqual(fresh['ETag'],headers['ETag'])
+            self.assertTrue(json.loads(body)['control']['live']['connected'])
+
     def test_catalog_contains_empty_saved_projects(self):
         code,_,body=self.request()
         self.assertEqual(code,200)
