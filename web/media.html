@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f5f5f7">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Media review · Desktop Companion</title>
+  <script src="/appearance.js?v=__BUILD__"></script>
+  <link rel="stylesheet" href="/theme.css?v=__BUILD__">
+  <link rel="stylesheet" href="/media.css?v=__BUILD__">
+  <script src="/media.js?v=__BUILD__" defer></script>
+</head>
+<body>
+  <header class="media-header">
+    <a class="companion-link" href="/" aria-label="Open Desktop Companion"><span class="media-mark" aria-hidden="true">DC</span><span>Desktop Companion</span></a>
+    <details class="theme-menu"><summary>Appearance</summary><div class="theme-options" role="group" aria-label="Appearance"><button type="button" data-theme-choice="light" aria-pressed="false">Light</button><button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button><button type="button" data-theme-choice="system" aria-pressed="true">System</button></div></details>
+  </header>
+  <main class="media-main">
+    <div class="page-heading"><div><p class="eyebrow">YOUR PRIVATE LIBRARY</p><h1>Media review</h1><p class="intro">Watch, seek and review your latest cuts.</p></div><button id="library-refresh" class="secondary-button" type="button">Refresh library</button></div>
+    <section id="media-notice" class="notice" role="status" aria-live="polite"><span id="notice-text">Connecting to your Mac…</span><a id="pair-link" class="primary-button" href="/" hidden>Pair this browser</a><button id="retry-library" class="secondary-button" type="button" hidden>Try again</button></section>
+    <div id="media-workspace" class="media-workspace" hidden>
+      <section class="review-panel" aria-labelledby="media-title">
+        <div class="player-frame"><video id="review-video" controls playsinline preload="metadata" aria-label="Selected media preview"><p>Your browser cannot play this video. Use the download link below.</p></video></div>
+        <div class="player-status-row"><p id="playback-status" class="playback-status" role="status" aria-live="polite">Tap play when you’re ready.</p><button id="retry-playback" class="text-button" type="button" hidden>Reload player</button></div>
+        <div class="review-detail"><div id="media-facts" class="media-facts"></div><h2 id="media-title"></h2><p id="media-description" class="media-description"></p><div class="review-actions"><a id="download-media" class="primary-button" download>Download video <span aria-hidden="true">↓</span></a><a id="download-captions" class="secondary-button" download hidden>Captions</a></div><p class="review-help">Use the player’s controls for full screen, playback speed and captions. Your Mac needs to stay connected while streaming.</p></div>
+      </section>
+      <aside class="library-panel" aria-labelledby="library-heading"><div class="library-heading"><h2 id="library-heading">Available to review</h2><span id="library-count"></span></div><nav id="media-library" aria-label="Media library"></nav><p class="library-help">Only media added to this private library appears here. Pairing is required to stream or download it.</p></aside>
+    </div>
+  </main>
+</body>
+</html>

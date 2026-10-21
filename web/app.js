@@ -729,7 +729,7 @@ el("back").addEventListener("click",()=>{if(history.state?.view==="chat")history
 window.addEventListener("popstate",()=>{const id=new URLSearchParams(location.search).get("chat");if(id&&chats.some(chat=>chat.id===id))selectChat(id,false);else showList();});
 el("login-form").addEventListener("submit",async event=>{
   event.preventDefault();el("login-submit").disabled=true;el("login-error").textContent="";
-  try{await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:el("pairing-code-input").value,name:el("device-name").value})});el("pairing-code-input").value="";await refreshAll();}
+  try{await api("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:el("pairing-code-input").value,name:el("device-name").value})});el("pairing-code-input").value="";if(mediaReturn()){location.assign(mediaReturn());return;}await refreshAll();}
   catch(error){el("login-error").textContent=error.message;}
   finally{el("login-submit").disabled=false;}
 });
@@ -805,6 +805,7 @@ window.addEventListener("online",()=>{if(document.body.classList.contains("booti
 const pollingEnabled=()=>!document.hidden&&!document.body.classList.contains('signed-out');
 CompanionConversation.poll({enabled:pollingEnabled,read:()=>document.body.classList.contains('booting')?initialize():refreshAll(false,true),delay:()=>inConversation()?15000:5000});
 CompanionConversation.poll({enabled:()=>pollingEnabled()&&Boolean(selected)&&!document.body.classList.contains('home-open'),read:refreshChat,delay:()=>sending||deliveryReceipts.list(selected).length||CompanionConversation.working(selectedData?.control?.live?.execution,connected)?1500:5000});
-async function initialize(){if(starting)return;starting=true;el("startup-retry").hidden=true;try{const auth=await api("/api/auth/status");if(auth.authenticated)await refreshAll();else lockScreen();}catch(error){el("startup-message").textContent=error.message;el("startup-retry").hidden=false;}finally{starting=false;}}
+function mediaReturn(){const id=new URLSearchParams(location.search).get('media');return /^[a-z0-9][a-z0-9-]{0,79}$/.test(id||'')?'/media?item='+id:null;}
+async function initialize(){if(starting)return;starting=true;el("startup-retry").hidden=true;try{const auth=await api("/api/auth/status");if(auth.authenticated){if(mediaReturn()){location.assign(mediaReturn());return;}await refreshAll();}else lockScreen();}catch(error){el("startup-message").textContent=error.message;el("startup-retry").hidden=false;}finally{starting=false;}}
 el("startup-retry").addEventListener("click",initialize);
 initialize();

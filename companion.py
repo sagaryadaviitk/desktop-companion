@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import CookieError, SimpleCookie
 from urllib.parse import parse_qs, urlsplit
@@ -32,11 +33,13 @@ from photos import PhotoStore, PhotoError
 from new_chat import NewChat,PERSONAL_WORKSPACE,prompt_title
 from configuration import load as load_configuration
 from system_status import read_record
+from media import MediaStore, byte_range
 
 
 ROOT = Path(__file__).resolve().parent
 STATIC_FILES={'/':('index.html','text/html'),'/style.css':('style.css','text/css'),'/theme.css':('theme.css','text/css'),
-              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation','shell','approvals')}}
+              '/media':('media.html','text/html'),'/media/':('media.html','text/html'),'/media.css':('media.css','text/css'),
+              **{f'/{name}.js':(f'{name}.js','text/javascript') for name in ('app','markdown','refresh','attachments','updates','new_chat','appearance','status','queue','conversation','shell','approvals','media')}}
 def web_build():
     digest=hashlib.sha256()
     for path in sorted((ROOT/'web').glob('*')):
@@ -577,7 +580,7 @@ class CompanionServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 32
 
-    def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None):
+    def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None):
         if remote and (access is None or settings is None):
             raise ValueError("The remote gateway requires authentication and explicit origin settings.")
         self.history = history
@@ -593,6 +596,7 @@ class CompanionServer(ThreadingHTTPServer):
         self.runtime = runtime
         self.photos=photos
         self.new_chat=new_chat
+        self.media=media or MediaStore(journal.path.parent/'media')
         self.slots = threading.BoundedSemaphore(32)
         super().__init__(address, Handler)
 
@@ -663,7 +667,7 @@ class Handler(BaseHTTPRequestHandler):
         data = json.dumps(value).encode() if mime == "application/json" else value
         self.send_response(code)
         self.send_header("Content-Type", mime + ("; charset=utf-8" if mime.startswith('text/') or mime=='application/json' else ''))
-        self.send_header("Content-Length", str(len(data)))
+        if code != 304: self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
@@ -674,7 +678,56 @@ class Handler(BaseHTTPRequestHandler):
         for key, value in extra_headers or []:
             self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != 'HEAD': self.wfile.write(data)
+
+    def stream_media(self, identifier, role, version=None):
+        try:
+            with self.server.media.open_asset(identifier, role, version) as (stream, asset, info):
+                size = info.st_size
+                etag = '"' + asset['name'].split('.')[0] + '"'
+                modified = formatdate(info.st_mtime, usegmt=True)
+                headers = [('Accept-Ranges', 'bytes'), ('ETag', etag), ('Last-Modified', modified)]
+                if self.headers.get('If-None-Match') in (etag, '*'):
+                    return self.reply(304, b'', asset['mime'], headers)
+                first, last, code = 0, size - 1, 200
+                requested = self.headers.get('Range') if self.command == 'GET' else None
+                if requested and self.headers.get('If-Range', etag) in (etag, modified):
+                    try: first, last = byte_range(requested, size)
+                    except ValueError:
+                        return self.reply(416, b'', asset['mime'], headers + [('Content-Range', f'bytes */{size}')])
+                    code = 206
+                    headers.append(('Content-Range', f'bytes {first}-{last}/{size}'))
+                self.send_response(code)
+                self.send_header('Content-Type', asset['mime'])
+                self.send_header('Content-Length', str(max(0, last - first + 1)))
+                self.send_header('Cache-Control', 'private, no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('X-Frame-Options', 'DENY')
+                self.send_header('Referrer-Policy', 'no-referrer')
+                self.send_header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; sandbox")
+                if self.server.remote: self.send_header('Strict-Transport-Security', 'max-age=86400')
+                if role == 'download':
+                    self.send_header('Content-Disposition', f'attachment; filename="{identifier}{Path(asset["name"]).suffix}"')
+                for name, value in headers: self.send_header(name, value)
+                self.end_headers()
+                if self.command == 'HEAD': return
+                stream.seek(first)
+                remaining = last - first + 1
+                while remaining > 0:
+                    chunk = stream.read(min(256 * 1024, remaining))
+                    if not chunk: break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (FileNotFoundError, ValueError, KeyError):
+            return self.reply(404, {'error': 'This media is unavailable. Reload the media page.'})
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            pass  # A seek or closed player can cancel its previous stream.
+
+    def do_HEAD(self):
+        path = urlsplit(self.path).path
+        if path in ('/media', '/media/', '/api/media') or path.startswith('/api/media/'):
+            return self.do_GET()
+        return self.reply(405, {'error': 'HEAD is available for media only.'})
 
     def valid_origin(self):
         host = self.headers.get("Host", "")
@@ -690,7 +743,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if self.server.remote and self.command == "POST" and request_origin != expected_origin:
             return False
-        if self.command == "GET" and urlsplit(self.path).path in STATIC_FILES:
+        if self.command in ("GET", "HEAD") and urlsplit(self.path).path in STATIC_FILES:
             if self.headers.get("Sec-Fetch-Mode") == "navigate" and self.headers.get("Sec-Fetch-Dest") == "document":
                 return True
         return self.headers.get("Sec-Fetch-Site", "none") in ("same-origin", "none")
@@ -725,13 +778,21 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path in static:
                 filename, mime = static[parsed.path]
                 data=(ROOT/'web'/filename).read_bytes()
-                if filename=='index.html':data=data.replace(b'__BUILD__',web_build().encode())
+                if filename in ('index.html','media.html'):data=data.replace(b'__BUILD__',web_build().encode())
                 return self.reply(200,data,mime)
             session = self.session()
             if parsed.path == "/api/auth/status":
                 return self.reply(200, {"remote": self.server.remote, "authenticated": bool(session) if self.server.remote else True})
             if self.server.remote and not session:
                 return self.reply(401, {"error": "Pair this browser before viewing conversations.", "auth_required": True})
+            if parsed.path == '/api/media':
+                return self.reply(200, {'items': self.server.media.catalog()})
+            if parsed.path.startswith('/api/media/'):
+                match = re.fullmatch(r'/api/media/([a-z0-9][a-z0-9-]{0,79})/(video|poster|captions|download)', parsed.path)
+                if not match: return self.reply(404, {'error': 'Media unavailable.'})
+                versions = parse_qs(parsed.query).get('v', [])
+                if len(versions) > 1: return self.reply(404, {'error': 'Media unavailable.'})
+                return self.stream_media(*match.groups(), versions[0] if versions else None)
             if parsed.path=='/api/photos/storage' and self.server.photos:
                 return self.reply(200,self.server.photos.storage(session['id'] if session else 'local'))
             if parsed.path.startswith('/api/photos/') and self.server.photos:
