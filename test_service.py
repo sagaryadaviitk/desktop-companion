@@ -158,16 +158,6 @@ class LaunchAgentTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):service.request_tunnel_restart()
             self.assertFalse(service.consume_tunnel_restart());self.assertEqual(target.read_text(),'Preserve')
 
-    def test_running_desktop_app_is_not_reopened(self):
-        with patch('service.subprocess.run',return_value=subprocess.CompletedProcess([],0,'/Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n')) as run:
-            service.ensure_desktop_app()
-        self.assertEqual(run.call_count,1)
-
-    def test_missing_desktop_process_is_opened_using_the_installed_app(self):
-        with patch('service.subprocess.run',side_effect=[subprocess.CompletedProcess([],1),subprocess.CompletedProcess([],0)]) as run,patch('service.Path.is_dir',return_value=True):
-            service.ensure_desktop_app()
-        self.assertEqual(run.call_args.args[0],['/usr/bin/open','-g','-j','/Applications/ChatGPT.app'])
-
     def test_child_process_cleanup_and_environment_do_not_leak_session_credentials(self):
         with patch.dict("os.environ",{"CF_API_TOKEN":"private-fixture","COMPANION_TOKEN":"private-fixture"}):
             value = service.definition(Path('/test/app'),'/python',Path('/test/user'),'/test/bin/codex')
@@ -185,7 +175,7 @@ class LaunchAgentTests(unittest.TestCase):
             plist.write_bytes(original)
             with patch.object(service,'STATE',root/'state'),patch.object(service,'PLIST',plist),patch.object(service,'launchctl') as launchctl:
                 with self.assertRaisesRegex(RuntimeError,'unrelated LaunchAgent'):
-                    service.install()
+                    service.install(background_install_approved=True)
             self.assertEqual(plist.read_bytes(),original)
             launchctl.assert_not_called()
 

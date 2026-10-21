@@ -26,6 +26,7 @@ REASONS={
     'network_changed':'The Mac’s network changed. Reconnecting the phone tunnel.',
     'manual_restart':'Reconnecting only the phone tunnel. Chats and the local dashboard keep running.',
     'startup_failed':'The protected phone connection could not start. Check the local gateway and Cloudflare configuration.',
+    'controller_repair_required':'Tunnel recovery paused after a permanent or repeated local failure. Review runtime files and security status before an explicit reconnect.',
 }
 
 EVENTS={'supervisor_started','connector_started','connector_exited','public_ready','public_degraded',

@@ -14,13 +14,30 @@ python3 manage.py doctor
 python3 manage.py setup
 ```
 
-The setup builds a fresh **Desktop Companion.app** in your own Applications folder and installs the login service. Raycast can open the app by name. Use `python3 manage.py setup --without-app` to install the browser/service without compiling the control app.
+The setup prepares local configuration and builds **Desktop Companion.app** in your own Applications folder. It does not create login startup or start the web service. Raycast can open the app by name. `python3 manage.py setup --without-app` skips the native build; background installation remains a separate explicit step below.
 
 The native build check runs the Swift compiler and verifies the selected macOS SDK. Finding `xcrun` alone is insufficient on a Mac whose command-line tools have not finished setup. Failed checks leave installation for you to resolve through Apple's normal tools.
 
 Native app updates copy the completed build into a temporary folder beside the destination before replacing the installed app. A failed copy leaves the working app untouched; a failed activation restores it. The previous version is retained at `~/Applications/.Desktop Companion.previous`. Because the replacement renames stay on the destination disk, the source folder can live on a different volume. A running copy is not restarted by this installer; reopen the control app after a successful update.
 
 A clean copy starts **locally only** at <http://127.0.0.1:8765>. Setup does not change sleep, passwords, FileVault, or Locked Use. Choose those settings separately in the native app when needed. The setup check reads history metadata and checks dependencies; it does not read credentials or send chat instructions.
+
+## Background installation and security recovery
+
+On a managed Mac, confirm your organization permits this background service before installing it. If endpoint protection quarantines any app, source or helper, stop here: retain the security incident evidence and use your approved IT/Security recovery process. Do not restore flagged files from Git or a ZIP, copy them to another location, keep reinstalling the job, or disable protection to regain access. The commands below are for an approved installation, not a quarantine workaround.
+
+Once approved, opt in explicitly:
+
+```sh
+python3 service.py install --background-install-approved
+python3 service.py status
+```
+
+Alternatively, `python3 manage.py setup --install-service` performs preparation plus the explicit background install. The native **Start system** action starts an existing approved job; it never creates a missing one. The flag expresses operator intent and grants no system permission or security exception. No recurring SSO/session-refresh job is installed by Companion.
+
+The new job stops retrying when its entrypoint or Python executable is missing, a required import/configuration is unavailable, or authenticated gateway startup fails. Its shell guard passes file paths as positional arguments, preserving spaces without evaluating them. These conditions require operator repair. Unexpected supervisor failures remain throttled by launchd to 60 seconds. The web, awake guard and tunnel controller have independent retry budgets; inspect private `.state/service.log` and `.state/service-error.log` when a component pauses. A fixed tunnel repair notice also appears in component status. Companion never automatically opens or relaunches ChatGPT.
+
+Existing jobs retain their old definition until explicitly reinstalled. Applying this supervisor/LaunchAgent change requires one approved, coordinated installation/restart; `restart-web` alone cannot apply it. Keep source in a permanent location and do not edit a running checkout. Immutable release directories and rollback-safe runtime deployment are not implemented by this patch.
 
 ## Phone access
 

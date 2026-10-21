@@ -88,6 +88,7 @@ def main():
     commands.add_parser('doctor')
     configure=commands.add_parser('configure');configure.add_argument('--hostname');configure.add_argument('--tunnel-id');configure.add_argument('--desktop-app');configure.add_argument('--local',action='store_true')
     setup=commands.add_parser('setup');setup.add_argument('--without-app',action='store_true',help='Run the web service without building the native control app')
+    setup.add_argument('--install-service',action='store_true',help='Explicitly install login startup after reviewing machine security requirements')
     export=commands.add_parser('bundle');export.add_argument('--output',type=Path,default=ROOT/'.state/exports/Desktop-Companion-source.zip')
     args=parser.parse_args()
     if args.command=='bundle':
@@ -107,8 +108,11 @@ def main():
     if args.command=='setup':
         if not (ROOT/FILENAME).exists():save({'hostname':None,'tunnel_id':None,'desktop_app':None})
         if not args.without_app:subprocess.run([sys.executable,str(ROOT/'build_app.py')],check=True)
-        subprocess.run([sys.executable,str(ROOT/'service.py'),'install'],check=True)
-        print('Setup complete. Open Desktop Companion from Raycast, or open http://127.0.0.1:8765. Power and Locked Use settings require separate native actions.')
+        if args.install_service:
+            subprocess.run([sys.executable,str(ROOT/'service.py'),'install','--background-install-approved'],check=True)
+            print('Setup complete. Login startup explicitly installed. Open Desktop Companion from Raycast, or http://127.0.0.1:8765.')
+        else:
+            print('Preparation complete. No background service was installed. Review SETUP.md before explicitly enabling login startup. Power and Locked Use settings require separate native actions.')
 
 
 if __name__=='__main__':
