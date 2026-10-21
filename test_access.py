@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from access import AccessStore, COOKIE_NAME, PairingError, RemoteSettings
 from companion import Bridge, CommandJournal, CompanionServer
+from read_cache import ReadCache
 from remote_access import named_configuration, preflight, public_status
 from test_companion import CHAT, make_history
 
@@ -130,8 +131,9 @@ class GatewayTests(unittest.TestCase):
         cls.settings.set_origin("https://phone.example")
         bridge = Bridge(root, enabled=False)
         journal = CommandJournal(root / "commands.sqlite")
-        cls.remote = CompanionServer(("127.0.0.1",0), cls.history, bridge, journal, access=cls.access, remote=True, settings=cls.settings)
-        cls.local = CompanionServer(("127.0.0.1",0), cls.history, bridge, journal, access=cls.access, settings=cls.settings, gateway_port=cls.remote.server_port)
+        reads=ReadCache()
+        cls.remote = CompanionServer(("127.0.0.1",0), cls.history, bridge, journal, access=cls.access, remote=True, settings=cls.settings,read_cache=reads)
+        cls.local = CompanionServer(("127.0.0.1",0), cls.history, bridge, journal, access=cls.access, settings=cls.settings, gateway_port=cls.remote.server_port,read_cache=reads)
         cls.workers = [threading.Thread(target=server.serve_forever, daemon=True) for server in [cls.local,cls.remote]]
         for worker in cls.workers:worker.start()
 
@@ -171,6 +173,7 @@ class GatewayTests(unittest.TestCase):
     def test_native_snapshot_stays_local_and_invalidates_after_authenticated_posts(self):
         self.local.reads.clear();self.addCleanup(self.local.reads.clear)
         cookie,_=self.pair()
+        csrf=json.loads(self.request("/api/status",cookie=cookie)[2])["csrf"]
         self.assertEqual(self.request('/api/control/status',cookie=cookie)[0],404)
         with patch('control.read_snapshot',return_value={'checked_at':123,'devices':[]} ) as read:
             first=self.request('/api/control/status',local=True)
@@ -179,6 +182,8 @@ class GatewayTests(unittest.TestCase):
             self.request('/api/control/status',local=True);self.assertEqual(read.call_count,1)
             self.request('/api/queue/recovery/dismiss','POST',{},headers={'X-Companion-CSRF':self.local.csrf},local=True)
             self.request('/api/control/status',local=True);self.assertEqual(read.call_count,2)
+            self.request('/api/queue/recovery/dismiss','POST',{},cookie=cookie,headers={'X-Companion-CSRF':csrf})
+            self.request('/api/control/status',local=True);self.assertEqual(read.call_count,3)
 
     def test_readiness_does_not_wait_for_catalog_or_execution(self):
         with patch.object(self.history,'active_candidates',side_effect=AssertionError('expensive read')):

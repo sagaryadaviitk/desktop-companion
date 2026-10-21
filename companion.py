@@ -581,7 +581,7 @@ class CompanionServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 32
 
-    def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None):
+    def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None,read_cache=None):
         if remote and (access is None or settings is None):
             raise ValueError("The remote gateway requires authentication and explicit origin settings.")
         self.history = history
@@ -595,7 +595,7 @@ class CompanionServer(ThreadingHTTPServer):
         self.inbox = inbox or Inbox(journal.path.with_name('inbox.sqlite'))
         self.account = account
         self.runtime = runtime
-        self.reads = ReadCache()
+        self.reads = read_cache if read_cache is not None else ReadCache()
         self.read_executor = ThreadPoolExecutor(max_workers=4,thread_name_prefix='companion-read')
         self.photos=photos
         self.new_chat=new_chat
@@ -1208,8 +1208,9 @@ def main():
     runtime=DesktopRuntime(args.codex_home,history.read_thread,queue_reader=history.queue_item,receipt_reader=history.has_client_receipt,promotions=QueuePromotions(ROOT/'.state'/'promotions.sqlite'),approval_redactor=redact)
     new_chat=NewChat(args.codex_home,PERSONAL_WORKSPACE)
     account.snapshot()
-    gateway = CompanionServer(("127.0.0.1", args.remote_port), history, bridge, journal, access=access, remote=True, settings=settings, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat)
-    server = CompanionServer(("127.0.0.1", args.port), history, bridge, journal, access=access, settings=settings, gateway_port=gateway.server_port, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat)
+    reads = ReadCache()
+    gateway = CompanionServer(("127.0.0.1", args.remote_port), history, bridge, journal, access=access, remote=True, settings=settings, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat,read_cache=reads)
+    server = CompanionServer(("127.0.0.1", args.port), history, bridge, journal, access=access, settings=settings, gateway_port=gateway.server_port, inbox=inbox, account=account, runtime=runtime,photos=photos,new_chat=new_chat,read_cache=reads)
     worker = threading.Thread(target=gateway.serve_forever, daemon=True)
     worker.start()
     print(f"Desktop Companion: http://127.0.0.1:{server.server_port}", flush=True)
