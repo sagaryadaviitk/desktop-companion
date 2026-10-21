@@ -8,6 +8,38 @@ import unittest
 
 @unittest.skipUnless(sys.platform=='darwin' and shutil.which('xcrun'),'macOS Swift tools are required')
 class NativePoliciesTests(unittest.TestCase):
+    def test_embedded_local_chat_origin_and_deep_link_policy(self):
+        source=Path(__file__).parent/'native'/'ControlPolicies.swift'
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);main=root/'main.swift';binary=root/'navigation'
+            main.write_text('''import Foundation
+assert(CompanionWebNavigation.isTrusted(CompanionWebNavigation.localChats))
+assert(CompanionWebNavigation.isTrusted(CompanionWebNavigation.conversations))
+for value in ["https://127.0.0.1:8765/local", "http://127.0.0.1:8766/local", "http://127.0.0.1.evil.test:8765/local", "http://localhost:8765/local", "http://user:secret@127.0.0.1:8765/local", "file:///tmp/local", "javascript:alert(1)"] {
+    let url=URL(string:value)!
+    assert(!CompanionWebNavigation.isTrusted(url))
+    assert(CompanionWebNavigation.embedded(url) == nil)
+}
+assert(CompanionWebNavigation.isLocalChat(URL(string:"http://127.0.0.1:8765/local?from=source-1")!))
+assert(CompanionWebNavigation.isLocalChat(URL(string:"http://127.0.0.1:8765/local/chat-1")!))
+assert(!CompanionWebNavigation.isLocalChat(URL(string:"http://127.0.0.1:8765/locality")!))
+assert(CompanionWebNavigation.canOpenInBrowser(URL(string:"https://example.com/document")!))
+assert(!CompanionWebNavigation.canOpenInBrowser(URL(string:"https://token@example.com")!))
+assert(!CompanionWebNavigation.canOpenInBrowser(URL(string:"file:///etc/passwd")!))
+assert(!CompanionWebNavigation.canOpenInBrowser(URL(string:"javascript:alert(1)")!))
+let source=URL(string:"http://127.0.0.1:8765/local?from=source-1&embedded=0&embedded=2#chat")!
+let embedded=CompanionWebNavigation.embedded(source)!
+let embeddedItems=URLComponents(url:embedded,resolvingAgainstBaseURL:false)!.queryItems!
+assert(embeddedItems.filter{$0.name == "embedded"}.map{$0.value!} == ["1"])
+assert(embeddedItems.first{$0.name == "from"}?.value == "source-1")
+let browser=CompanionWebNavigation.browserURL(embedded)!
+assert(browser.absoluteString == "http://127.0.0.1:8765/local?from=source-1#chat")
+print("Native chat navigation checks passed")
+''')
+            subprocess.run(['xcrun','swiftc',str(source),str(main),'-o',str(binary)],check=True,capture_output=True,timeout=60)
+            result=subprocess.run([str(binary)],check=True,capture_output=True,text=True,timeout=10)
+            self.assertIn('Native chat navigation checks passed',result.stdout)
+
     def test_timeout_defaults_validation_readback_and_stale_health(self):
         source=Path(__file__).parent/'native'/'ControlPolicies.swift'
         with tempfile.TemporaryDirectory() as temp:

@@ -17,6 +17,8 @@ const deliveryReceipts=CompanionConversation.receipts();
 let conversationScroll=null,approvalUI=null,photoStorageBusy=false;
 const loadedBuild=document.querySelector('meta[name=companion-build]').content;
 let updater=null;
+const localEntry=CompanionLocalEntry.create({document,api,embedded:new URLSearchParams(location.search).get('embedded')==='1'});
+if(typeof BroadcastChannel==='function'){const localChanges=new BroadcastChannel('companion-local-change');localChanges.onmessage=event=>{if(event.data?.kind==='changed'&&connected)void localEntry.refresh();};}
 function hasUnsentDraft(){return Boolean(approvalUI?.hasDraft())||Boolean(newChatFlow?.hasDraft())||[...drafts.values()].some(value=>value.trim())||[...photoDrafts.values()].some(value=>value.length)||[...questionDrafts.values()].some(value=>typeof value==='string'?value.trim():value?.answer||value?.text);}
 function executionStatus(chat){if(!connected&&chat.last_recorded_turn?.status==='inProgress')return 'unknown';return currentStatus?.execution?.[chat.id]?.status||(chat.last_recorded_turn?.status==='inProgress'?'unknown':chat.last_recorded_turn?.status==='failed'?'failed':chat.last_recorded_turn?.status==='interrupted'?'paused':'idle');}
 const questionDrafts=new Map(),questionBusy=new Set();
@@ -59,6 +61,7 @@ async function api(path, options = {}) {
 }
 
 function lockScreen(){
+  localEntry.reset();
   authVersion++;selectionVersion++;deliveryReceipts.reset();chatRefreshPromise=null;connected=false;currentStatus=null;chatSignature="";pendingSignature="";commandAttempts.clear();
   inboxView="recent";homeSignature="";deliveryMode="queue";readAcknowledgements.clear();modelAttempts.clear();
   displayedRevision=null;readRequests.clear();refreshPromise=null;cancelAnimationFrame(readFrame);el('pull-refresh').hidden=true;
@@ -86,6 +89,7 @@ function lockScreen(){
 function showNotice(message){el("notice-text").textContent=message;el("notice").hidden=!message;}
 function updateComposer(){
   el('chat-options').disabled=!selectedData;
+  localEntry.select(selectedData?.id);
   const panel=el("messages"),atBottom=conversationScroll?.following()??panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
   const input=el("instruction"),available=Boolean(selectedData?.control?.available);
   const photoCount=(photoDrafts.get(selected)||[]).length,uploading=photoUploads.get(selected)||0;
@@ -680,6 +684,7 @@ async function refreshWorkspace(skipChat=false){
     const [status,list]=await Promise.all([api("/api/status"),api("/api/chats",catalogRevision?{headers:{'If-None-Match':'"'+catalogRevision+'"'}}:{})]);
     if(version!==authVersion)return;
     connected=true;
+    void localEntry.refresh();
     currentStatus=status;csrf=status.csrf;if(updater?.check(status.build))return;if(!list.unchanged){chats=list.chats;projects=list.projects||[];catalogRevision=list.revision||'';}applyReadAcknowledgements();renderProjects();renderChats();renderUsage();el('new-chat').disabled=!status.control?.available;
     document.body.classList.remove("booting","signed-out","disconnected");document.body.classList.add("ready");
     el("phone-setup").hidden=!status.phone_setup_available;el('sign-out-area').hidden=status.mode!=="remote";el('account-description').textContent=status.mode==='remote'?'This browser is paired with your Mac.':'You’re viewing Companion on this Mac.';
