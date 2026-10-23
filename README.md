@@ -6,6 +6,10 @@ For a second Mac, start with [SETUP.md](SETUP.md). Each Mac has independent sett
 
 For an existing installation, follow [After pulling an update](#after-pulling-an-update). Pulling code alone does not replace a running process or update an installed LaunchAgent definition.
 
+## Browser pages on your phone
+
+Open **… → This browser → Browser** to view and interact with regular pages from the desktop browser. It uses your existing phone pairing, fresh screenshots and bounded controls; chat drafts stay in their original tab. Browser sharing is disabled until explicitly enabled on each Mac. Activation requires a desktop-app relaunch with a loopback browser connection; review [BROWSER.md](BROWSER.md) before doing that. A source update alone does not enable debugging or browser sharing.
+
 ## Responsive updates and recovery
 
 An open conversation checks for changes every 750 ms while working or awaiting delivery, and every 3 seconds while idle. These are polling intervals after a completed read, not a delivery-latency guarantee. The workspace checks every 5 seconds, or every 15 seconds inside a conversation. Hidden/offline views pause and resume with a fresh check. Failed reads use capped exponential backoff with equal jitter (up to 30 seconds), honoring bounded server `Retry-After` guidance. Sends, approvals and uncertain commands are never automatically replayed.
