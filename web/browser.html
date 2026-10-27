@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark"><meta name="referrer" content="no-referrer">
+  <meta name="companion-build" content="__BUILD__"><title>Browser · Desktop Companion</title>
+  <script src="/appearance.js?v=__BUILD__"></script>
+  <link rel="stylesheet" href="/theme.css?v=__BUILD__"><link rel="stylesheet" href="/browser.css?v=__BUILD__">
+  <script src="/conversation.js?v=__BUILD__" defer></script><script src="/browser.js?v=__BUILD__" defer></script>
+</head>
+<body>
+  <header><a id="chat-back" class="brand" href="/">‹ <span id="back-label">Companion</span></a><strong id="context-title">Desktop browser</strong><button id="focus-view" type="button" aria-pressed="false">Focus view</button><button id="refresh" type="button">Refresh</button></header>
+  <main>
+    <section class="intro"><h1 id="heading">Your desktop pages</h1><p id="context-detail">The same desktop view as your Mac. Tap to click, swipe to scroll, or zoom in and drag to pan.</p></section>
+    <div id="notice" class="notice" role="status" aria-live="polite">Connecting to your Mac…</div>
+    <a id="pair" class="button" href="/" hidden>Pair this browser</a>
+    <button id="reload-app" type="button" hidden>Reload updated interface</button>
+    <section id="workspace" hidden>
+      <div class="page-picker"><label for="tabs">Desktop page</label><select id="tabs" aria-label="Choose the desktop page to use"></select></div>
+      <p id="selection-note" class="shared-note">Choose the desktop page you want to view.</p>
+      <form id="navigation" class="navigation"><button type="button" id="back" aria-label="Previous page" data-control>←</button><button type="button" id="forward" aria-label="Next page" data-control>→</button><label class="sr-only" for="address">Page address</label><input id="address" type="url" placeholder="https://…" autocomplete="off" spellcheck="false"><button type="submit" data-control>Go</button><button type="button" id="reload-page" aria-label="Reload desktop page" data-control>↻</button></form>
+      <div class="view-heading"><span id="page-title"></span><span id="desktop-size"></span><span id="freshness" role="status">Waiting for a fresh view</span></div>
+      <div id="viewport" class="viewport stale"><img id="screen" alt="Current desktop browser page. Tap to interact; swipe to scroll." draggable="false" hidden><p id="loading">Choose a page to view it here.</p></div>
+      <div class="viewer-tools"><div class="zoom-controls" role="group" aria-label="Scale the phone view"><button id="zoom-out" type="button" aria-label="Zoom out">−</button><button id="zoom" type="button" aria-pressed="false">Fit</button><button id="zoom-in" type="button" aria-label="Zoom in">＋</button></div><div class="scroll-controls"><button id="scroll-up" type="button" data-control>↑ Scroll</button><button id="scroll-down" type="button" data-control>↓ Scroll</button></div></div>
+      <p id="zoom-hint" class="shared-note" hidden>Drag to pan the enlarged image; tap to click. The scroll buttons move the desktop page.</p>
+      <p class="shared-note desktop-note">Controls act on the same page on your Mac. The desktop page keeps its layout and sign-in.</p>
+      <section class="typing" aria-label="Type into the desktop page"><p>Tap a field in the page first, then enter text below.</p><form id="typing-form"><label class="sr-only" for="text">Text for the focused desktop field</label><input id="text" type="password" maxlength="4000" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type or paste text…"><button id="show-text" type="button" aria-pressed="false">Show</button><button id="insert" type="submit" data-control>Insert</button></form><div class="key-controls"><button type="button" data-key="SelectAll" data-control>Select all</button><button type="button" data-key="Backspace" data-control>⌫ Delete</button><button type="button" data-key="Tab" data-control>Tab ⇥</button><button type="button" data-key="Enter" data-control>Enter ↵</button><button type="button" data-key="Escape" data-control>Esc</button></div></section>
+      <p id="action-result" class="result" role="status" aria-live="polite"></p>
+    </section>
+    <section id="empty" class="empty" hidden><div class="empty-icon" aria-hidden="true">▤</div><h2 id="empty-title">No desktop pages are open</h2><p id="empty-detail">Open a web page in the desktop app’s browser, then refresh this list.</p></section>
+  </main>
+</body>
+</html>

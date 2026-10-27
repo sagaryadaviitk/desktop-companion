@@ -164,9 +164,9 @@ class GatewayTests(unittest.TestCase):
 
     def test_anonymous_reads_and_commands_never_reach_history_or_bridge(self):
         with patch.object(self.history,"list_threads") as read, patch.object(self.remote.bridge,"send") as send, patch("companion.cached_power_state") as power_read:
-            for path in ["/api/chats","/api/chat?id="+CHAT,"/api/status","/api/ready","/api/control/status","/api/components","/api/devices","/api/photos/"+'a'*32,'/api/local/status','/api/local/chats','/api/local/chat?id=local-fixture']:
+            for path in ["/api/browser","/api/browser/frame?id=page-1","/api/chats","/api/chat?id="+CHAT,"/api/status","/api/ready","/api/control/status","/api/components","/api/devices","/api/photos/"+'a'*32,'/api/local/status','/api/local/chats','/api/local/chat?id=local-fixture']:
                 self.assertEqual(self.request(path)[0],401)
-            for path in ['/api/command','/api/read-state','/api/model','/api/questions/answer','/api/queue/steer','/api/queue/recovery/dismiss','/api/photos','/api/photos/remove','/api/local/chats','/api/local/message','/api/local/archive']:
+            for path in ['/api/browser/action','/api/command','/api/read-state','/api/model','/api/questions/answer','/api/queue/steer','/api/queue/recovery/dismiss','/api/photos','/api/photos/remove','/api/local/chats','/api/local/message','/api/local/archive']:
                 self.assertEqual(self.request(path,"POST",{"thread_id":CHAT,"message":"hello"})[0],401)
         read.assert_not_called();send.assert_not_called();power_read.assert_not_called()
 
@@ -188,6 +188,35 @@ class GatewayTests(unittest.TestCase):
     def test_readiness_does_not_wait_for_catalog_or_execution(self):
         with patch.object(self.history,'active_candidates',side_effect=AssertionError('expensive read')):
             self.assertEqual(self.request('/api/ready',local=True)[0],200)
+
+    def test_browser_routes_require_pairing_and_csrf_and_pass_the_authenticated_owner(self):
+        from unittest.mock import Mock
+        browser=Mock()
+        browser.catalog.return_value={'available':True,'tabs':[]}
+        browser.select.return_value={'available':True,'tabs':[],'selection':{'id':'page-1','revision':'chosen-page','source':'manual','available':True}}
+        browser.snapshot.return_value={'id':'page-1','frame':'test-frame','image':'fake'}
+        browser.action.return_value={'state':'applied'}
+        with patch.object(self.remote,'browser_remote',browser):
+            self.assertEqual(self.request('/api/browser')[0],401)
+            self.assertEqual(self.request('/api/browser/frame?id=page-1')[0],401)
+            self.assertEqual(self.request('/api/browser/select','POST',{'chat_id':CHAT,'id':'page-1'})[0],401)
+            browser.catalog.assert_not_called();browser.snapshot.assert_not_called();browser.select.assert_not_called()
+            cookie,_=self.pair()
+            catalog=self.request('/api/browser',cookie=cookie);self.assertEqual(catalog[0],200)
+            csrf=json.loads(catalog[2])['csrf']
+            self.assertEqual(self.request('/api/browser/action','POST',{'action':'reload'},cookie=cookie)[0],403)
+            browser.action.assert_not_called()
+            self.assertEqual(self.request('/api/browser/frame?id=page-1&id=other',cookie=cookie)[0],400)
+            self.assertEqual(self.request('/api/browser/frame?id=page-1',cookie=cookie)[0],400)
+            self.assertEqual(self.request('/api/browser/select','POST',{'chat_id':'','id':'page-1'},cookie=cookie,headers={'X-Companion-CSRF':csrf})[0],200)
+            self.assertEqual(self.request('/api/browser/frame?id=page-1&selection_revision=chosen-page',cookie=cookie)[0],200)
+            owner=browser.snapshot.call_args.args[1]
+            self.assertTrue(owner);self.assertNotEqual(owner,'local')
+            self.assertEqual(browser.snapshot.call_args.kwargs,{'chat_id':'','selection_revision':'chosen-page'})
+            self.assertEqual(browser.select.call_args.args,('page-1',owner,''))
+            self.assertEqual(self.request('/api/browser/action','POST',{'id':'page-1','frame':'test-frame','chat_id':'','selection_revision':'chosen-page','action':'reload'},cookie=cookie,headers={'X-Companion-CSRF':csrf})[0],200)
+            self.assertEqual(browser.action.call_args.args[1],owner)
+            self.assertEqual(self.request('/browser',cookie=cookie)[0],200)
 
     def test_login_shell_has_no_conversation_text(self):
         response = self.request("/")

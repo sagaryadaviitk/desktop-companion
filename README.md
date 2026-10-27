@@ -6,6 +6,12 @@ For a second Mac, start with [SETUP.md](SETUP.md). Each Mac has independent sett
 
 For an existing installation, follow [After pulling an update](#after-pulling-an-update). Pulling code alone does not replace a running process or update an installed LaunchAgent definition.
 
+## Browser pages on your phone
+
+Open a chat and tap **Browser ↗** to view its existing Mac browser page in a new phone tab. Choose the page explicitly: the desktop connection does not expose verified chat ownership, and Companion never guesses or silently switches pages. The viewer retains the desktop layout with Fit, zoom/pan, Focus view, tap/swipe, navigation and text input. The original chat keeps its draft and photos. The general viewer remains under **… → This browser → Browser**.
+
+Browser sharing uses the existing phone pairing and fresh, single-use screenshot controls. It starts disabled on each Mac. Activation requires a desktop-app relaunch with a loopback browser connection; review [BROWSER.md](BROWSER.md) before doing that. Installing source alone does not enable debugging or browser sharing.
+
 ## Responsive updates and recovery
 
 An open conversation checks for changes every 750 ms while working or awaiting delivery, and every 3 seconds while idle. These are polling intervals after a completed read, not a delivery-latency guarantee. The workspace checks every 5 seconds, or every 15 seconds inside a conversation. Hidden/offline views pause and resume with a fresh check. Failed reads use capped exponential backoff with equal jitter (up to 30 seconds), honoring bounded server `Retry-After` guidance. Sends, approvals and uncertain commands are never automatically replayed.
