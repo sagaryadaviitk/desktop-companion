@@ -8,14 +8,14 @@ Each Mac runs independently. Source changes can be shared; active chats, desktop
 
 ## Set up the second Mac
 
-Sign in to your personal GitHub account using the normal GitHub CLI/browser flow, then clone:
+First obtain access to this private repository and follow [SETUP prerequisites](SETUP.md#prerequisites), including selecting `COMPANION_PYTHON` in this terminal. Sign in with the GitHub account granted access, then clone:
 
 ```sh
 gh auth login
 gh repo clone sagaryadaviitk/desktop-companion
 cd desktop-companion
-python3 manage.py doctor
-python3 manage.py setup
+"$COMPANION_PYTHON" manage.py doctor
+"$COMPANION_PYTHON" manage.py setup
 ```
 
 Follow [SETUP.md](SETUP.md) for prerequisites and that Mac's phone access. The new checkout defaults to local-only mode. Give each Mac its own hostname and Cloudflare tunnel, then pair its browser independently. Build the native app on its destination Mac; a compiled app contains that Mac's local source and Python paths.
@@ -50,30 +50,30 @@ Use a distinct branch for each agent's work. Review the diff and CI checks, merg
 
 ## Apply an update on a Mac
 
-From a clean checkout:
+The Git update workflow requires a clone; source-ZIP users should follow [bundle upgrade guidance](SETUP.md#update-validate-and-export). From a clean checkout, after selecting `COMPANION_PYTHON` as described in [SETUP](SETUP.md#prerequisites):
 
 ```sh
 git fetch origin
 git switch main
 git pull --ff-only
-python3 manage.py doctor
-python3 -m unittest discover -p 'test_*.py' -q
+"$COMPANION_PYTHON" manage.py doctor
+"$COMPANION_PYTHON" -m unittest discover -p 'test_*.py' -q
 node --test test_*.cjs
 ```
 
-Node 24 is used by CI; Python 3.11 or newer is required. There are no Python package dependencies. Read the [release-specific action in README](README.md#one-time-upgrade-from-999f022-or-an-older-recovery-service), then use the commands appropriate to the files changed:
+Append `--without-app` to doctor for installations that skip the native control app. Node 24 is used by CI; Python 3.11 or newer is required. There are no Python package dependencies. Read the [release-specific action in README](README.md#one-time-upgrade-from-999f022-or-an-older-recovery-service), then use the commands appropriate to the files changed:
 
 | Changed source | Apply locally |
 | --- | --- |
 | Documentation or tests only | No runtime action. |
 | Static files in `web/` | No service restart. Open tabs detect the update; refresh when a draft is safe. |
-| Python HTTP/bridge code | `python3 service.py restart-web` preserves the tunnel and awake guard. |
-| Native Swift code or `build_app.py` | `python3 build_app.py`, then reopen Desktop Companion from Raycast. |
-| `service.py` supervisor logic or machine configuration | Schedule one `python3 service.py restart`; this recreates the whole group and disconnects the existing tunnel. |
-| LaunchAgent definition, startup guard, Python path or login-log location | Update the existing approved job with `python3 service.py install --background-install-approved`. This restarts once; an extra `restart` is unnecessary. |
+| Python HTTP/bridge code | `"$COMPANION_PYTHON" service.py restart-web` preserves the tunnel and awake guard. |
+| Native Swift code or `build_app.py` | `"$COMPANION_PYTHON" build_app.py`, then reopen Desktop Companion from Raycast. |
+| `service.py` supervisor logic or machine configuration | Schedule one `"$COMPANION_PYTHON" service.py restart`; this recreates the whole group and disconnects the existing tunnel. |
+| LaunchAgent definition, startup guard, Python path or login-log location | Update the existing approved job with `"$COMPANION_PYTHON" service.py install --background-install-approved`. This restarts once; an extra `restart` is unnecessary. |
 | Optional outage page | Follow [cloudflare_fallback/README.md](cloudflare_fallback/README.md) for that Mac's hostname. |
 
-Check `python3 service.py status` and `python3 manage.py doctor` afterward. Local health, public authentication, real message delivery, and locked-screen native interaction are separate checks.
+Check `"$COMPANION_PYTHON" service.py status` and `"$COMPANION_PYTHON" manage.py doctor` afterward. Local health, public authentication, real message delivery, and locked-screen native interaction are separate checks. Record destination-Mac results using [COMPATIBILITY.md](COMPATIBILITY.md#destination-mac-acceptance-checklist).
 
 The recovery-hardening release in `21499f3` requires that one-time job update when upgrading from `999f022` or another installation with the old LaunchAgent definition. Pulling source or restarting the old job does not rewrite its definition. Preserve each Mac's own local configuration and runtime stores. Network-specific diagnostics or managed-proxy changes stay local to that Mac; a documentation update does not authorize or deploy them elsewhere.
 
