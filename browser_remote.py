@@ -128,7 +128,7 @@ class BrowserRemote:
         self.verifier = verifier or self.verify_endpoint
         self.fetcher = fetcher or self.fetch_targets
         self.client_factory, self.clock = client_factory, clock
-        self.frames = OrderedDict(); self.gate = threading.Lock()
+        self.frames = OrderedDict(); self.selections = OrderedDict(); self.gate = threading.Lock()
 
     def settings(self):
         if not self.path.exists(): return {'enabled':False}
@@ -203,16 +203,50 @@ class BrowserRemote:
             targets.append({'id':item['id'],'title':str(item.get('title') or 'Untitled page')[:300], 'url':item['url'],'path':address.path})
         return port,targets
 
-    def catalog(self):
-        port, targets = self.targets()
+    @staticmethod
+    def context(owner, chat_id):
+        if not isinstance(owner,str) or not owner or not isinstance(chat_id,str) or chat_id and not IDENTITY.fullmatch(chat_id):
+            raise BrowserError('Choose an available chat before opening its browser.',400)
+        return owner,chat_id
+
+    def _catalog(self, port, targets, owner, chat_id):
+        selection = self.selections.get(self.context(owner,chat_id)) if owner is not None else None
+        if selection and not any(t['id']==selection['id'] for t in targets):
+            # A closed target never silently rebinds, even if its ID reappears.
+            selection['closed'] = True
         return {'available':port is not None,'tabs':[{k:t[k] for k in ('id','title','url')} for t in targets],
+                'selection':{'id':selection['id'],'source':'manual','available':not selection['closed'],'revision':selection['revision']} if selection else None,
                 'reason':'' if port else 'Finish browser sharing setup on your Mac, then refresh.','checked_at':int(time.time()*1000)}
 
-    def target(self, identity):
+    def catalog(self, owner=None, chat_id=''):
+        with self.exclusive():
+            return self._catalog(*self.targets(),owner,chat_id)
+
+    def select(self, identity, owner, chat_id=''):
+        context = self.context(owner,chat_id)
+        with self.exclusive():
+            port,targets = self.targets()
+            if not isinstance(identity,str) or not IDENTITY.fullmatch(identity) or not any(t['id']==identity for t in targets):
+                raise BrowserError('This page is no longer available. Refresh the page list.',404)
+            self.selections[context] = {'id':identity,'revision':secrets.token_urlsafe(24),'closed':False}
+            self.selections.move_to_end(context)
+            while len(self.selections)>128:self.selections.popitem(last=False)
+            return self._catalog(port,targets,owner,chat_id)
+
+    def selected(self, identity, owner, chat_id, revision):
+        selection = self.selections.get(self.context(owner,chat_id))
+        if (not selection or selection['closed'] or selection['id']!=identity
+                or not isinstance(revision,str) or selection['revision']!=revision):
+            raise BrowserError('Choose a page for this chat, then refresh before controlling it.')
+        return selection
+
+    def target(self, identity, selection=None):
         if not isinstance(identity,str) or not IDENTITY.fullmatch(identity): raise BrowserError('Choose an available page.',400)
         port, targets = self.targets()
         target = next((t for t in targets if t['id']==identity),None)
-        if target is None: raise BrowserError('This page is no longer available. Refresh the page list.',404)
+        if target is None:
+            if selection is not None:selection['closed']=True
+            raise BrowserError('This page is no longer available. Refresh the page list.',404)
         return port,target
 
     @contextmanager
@@ -232,22 +266,30 @@ class BrowserRemote:
             raise BrowserError('The current page view could not be verified. Refresh it.')
         return {'document':tuple(frame[k] for k in ('id','loaderId','url')),'viewport':tuple(values)}
 
-    def snapshot(self, identity, owner):
+    @staticmethod
+    def capture(client):
+        data = client.call('Page.captureScreenshot',{'format':'jpeg','quality':65,'fromSurface':True,'captureBeyondViewport':False}).get('data')
+        try: image = base64.b64decode(data,validate=True)
+        except (ValueError,TypeError): raise BrowserError('The page image could not be read.',503)
+        if not image.startswith(b'\xff\xd8') or len(image)>5*1024*1024: raise BrowserError('The page image exceeds the supported size.',503)
+        return data
+
+    def snapshot(self, identity, owner, *, chat_id='', selection_revision=None):
         with self.exclusive():
-            port,target = self.target(identity)
+            selection=self.selected(identity,owner,chat_id,selection_revision)
+            port,target = self.target(identity,selection)
             with self.client_factory(port,target['path']) as client:
                 before = self.witness(client)
                 if before['document'][2] != target['url']: raise BrowserError('The page navigated. Refresh it before continuing.')
-                data = client.call('Page.captureScreenshot',{'format':'jpeg','quality':65,'fromSurface':True,'captureBeyondViewport':False}).get('data')
+                data = self.capture(client)
                 after = self.witness(client)
             if before != after: raise BrowserError('The page moved while refreshing. Refresh again.')
-            try: image = base64.b64decode(data,validate=True)
-            except (ValueError,TypeError): raise BrowserError('The page image could not be read.',503)
-            if not image.startswith(b'\xff\xd8') or len(image)>5*1024*1024: raise BrowserError('The page image exceeds the supported size.',503)
             token = secrets.token_urlsafe(24)
-            self.frames[token] = {'owner':owner,'id':identity,'view':after,'created':self.clock(),'used':False}
+            self.frames[token] = {'owner':owner,'chat_id':chat_id,'selection_revision':selection_revision,'id':identity,
+                                  'view':after,'created':self.clock(),'used':False}
             while len(self.frames)>128: self.frames.popitem(last=False)
             return {'frame':token,'id':identity,'title':target['title'],'url':target['url'],'image':data,
+                    'chat_id':chat_id,'selection_revision':selection_revision,
                     'image_mime':'image/jpeg','width':after['viewport'][0],'height':after['viewport'][1],'checked_at':int(time.time()*1000)}
 
     @staticmethod
@@ -256,7 +298,7 @@ class BrowserRemote:
         return value
 
     def action(self, payload, owner):
-        if not isinstance(payload,dict) or set(payload)-{'id','frame','action','x','y','dx','dy','text','key','url'}: raise BrowserError('Unsupported page control.',400)
+        if not isinstance(payload,dict) or set(payload)-{'id','frame','action','x','y','dx','dy','text','key','url','chat_id','selection_revision'}: raise BrowserError('Unsupported page control.',400)
         action = payload.get('action')
         if action not in ('click','scroll','text','key','navigate','back','forward','reload'): raise BrowserError('Unsupported page control.',400)
         if action=='click' and not {'x','y'}<=set(payload): raise BrowserError('Tap a location in the page.',400)
@@ -269,11 +311,14 @@ class BrowserRemote:
         if action=='key' and (not isinstance(payload.get('key'),str) or payload['key'] not in keys): raise BrowserError('Unsupported page key.',400)
         if action=='navigate' and not self.allowed_url(payload.get('url')): raise BrowserError('Use a regular HTTP or HTTPS page address.',400)
         with self.exclusive():
+            selection=self.selected(payload.get('id'),owner,payload.get('chat_id'),payload.get('selection_revision'))
             receipt = self.frames.get(payload.get('frame')) if isinstance(payload.get('frame'),str) else None
-            if not receipt or receipt['owner']!=owner or receipt['id']!=payload.get('id') or self.clock()-receipt['created']>8:
+            if (not receipt or receipt['owner']!=owner or receipt['id']!=payload.get('id')
+                    or receipt['chat_id']!=payload.get('chat_id') or receipt['selection_revision']!=payload.get('selection_revision')
+                    or self.clock()-receipt['created']>8):
                 raise BrowserError('Refresh this page before controlling it.')
             if receipt['used']: raise BrowserError('This control was already attempted. Refresh before another action.',uncertain=True)
-            port,target = self.target(receipt['id'])
+            port,target = self.target(receipt['id'],selection)
             with self.client_factory(port,target['path']) as client:
                 current = self.witness(client)
                 if current != receipt['view'] or current['document'][2] != target['url']:

@@ -301,6 +301,14 @@ class History:
             result[identifier]=pending_questions(rows,redact)
         return result
 
+    def chat_identity(self, thread_id):
+        """Read only chat identity/label; browser polling never hydrates history."""
+        if not isinstance(thread_id,str) or not THREAD_ID.fullmatch(thread_id):raise KeyError(thread_id)
+        with readonly_db(self.state) as connection:
+            row=connection.execute('SELECT id,name,title FROM threads WHERE id=?',(thread_id,)).fetchone()
+        if row is None:raise KeyError(thread_id)
+        return {'id':row['id'],'title':redact(row['name'] or row['title'] or 'Untitled chat')[:300]}
+
     def read_thread(self, thread_id, before=None):
         if not THREAD_ID.fullmatch(thread_id):
             raise KeyError(thread_id)
@@ -735,6 +743,14 @@ class Handler(BaseHTTPRequestHandler):
         turn=thread.get('last_recorded_turn') or {}
         return {'status':'working' if turn.get('status')=='inProgress' else 'idle','turn_id':turn.get('turn_id')}
 
+    def browser_chat(self, identity):
+        if identity=='':return None
+        if not isinstance(identity,str) or not THREAD_ID.fullmatch(identity):
+            raise BrowserError('Choose an available desktop chat.',400)
+        try:thread=self.server.history.chat_identity(identity)
+        except KeyError:raise BrowserError('This desktop chat is no longer available.',404)
+        return {'id':thread['id'],'title':thread['title']}
+
     def setup(self):
         super().setup()
         self.connection.settimeout(15)
@@ -890,13 +906,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(404,{'error':'Unknown local route.'})
             if parsed.path in ('/api/browser','/api/browser/frame'):
                 browser=self.server.browser_remote
-                if not browser:return self.reply(200,{'available':False,'tabs':[],'reason':'Browser sharing is not enabled in this viewer.','csrf':session['csrf'] if session else self.server.csrf,'build':web_build()})
                 try:
+                    query=parse_qs(parsed.query,keep_blank_values=True)
+                    chats=query.get('chat',[''])
+                    if len(chats)!=1:raise BrowserError('Choose one desktop chat.',400)
+                    chat_id=chats[0];chat=self.browser_chat(chat_id)
+                    if not browser:return self.reply(200,{'available':False,'tabs':[],'selection':None,'chat':chat,'reason':'Browser sharing is not enabled in this viewer.','csrf':session['csrf'] if session else self.server.csrf,'build':web_build()})
+                    owner=session['id'] if session else 'local'
                     if parsed.path=='/api/browser':
-                        return self.reply(200,{**browser.catalog(),'csrf':session['csrf'] if session else self.server.csrf,'build':web_build()})
-                    identities=parse_qs(parsed.query).get('id',[])
+                        return self.reply(200,{**browser.catalog(owner,chat_id),'chat':chat,'csrf':session['csrf'] if session else self.server.csrf,'build':web_build()})
+                    identities=query.get('id',[]);revisions=query.get('selection_revision',[])
                     if len(identities)!=1:raise BrowserError('Choose one browser page.',400)
-                    return self.reply(200,browser.snapshot(identities[0],session['id'] if session else 'local'))
+                    if len(revisions)!=1:raise BrowserError('Choose a page for this chat before refreshing it.',400)
+                    return self.reply(200,browser.snapshot(identities[0],owner,chat_id=chat_id,selection_revision=revisions[0]))
                 except BrowserError as error:return self.reply(error.status,{'error':str(error)},extra_headers=[('Retry-After','1')] if error.status==429 else None)
                 except (OSError,ValueError,TypeError,KeyError,subprocess.SubprocessError):return self.reply(503,{'error':'The desktop browser connection is unavailable. Check browser setup on your Mac.'})
             if parsed.path == '/api/media':
@@ -1031,9 +1053,15 @@ class Handler(BaseHTTPRequestHandler):
                 if self.path=='/api/local/message':return self.reply(202,self.server.local_assistant.send(payload))
                 if self.path=='/api/local/archive':return self.reply(200,self.server.local_assistant.archive(payload))
                 return self.reply(404,{'error':'Unknown local route.'})
-            if self.path=='/api/browser/action':
+            if self.path in ('/api/browser/action','/api/browser/select'):
                 if not self.server.browser_remote:return self.reply(409,{'error':'Browser sharing is not enabled in this viewer.'})
-                try:return self.reply(200,self.server.browser_remote.action(self.read_payload(),session['id'] if session else 'local'))
+                try:
+                    payload=self.read_payload();chat=self.browser_chat(payload.get('chat_id'))
+                    owner=session['id'] if session else 'local'
+                    if self.path=='/api/browser/select':
+                        if set(payload)!={'chat_id','id'}:raise BrowserError('Choose one browser page for this chat.',400)
+                        return self.reply(200,{**self.server.browser_remote.select(payload['id'],owner,payload['chat_id']),'chat':chat,'csrf':csrf,'build':web_build()})
+                    return self.reply(200,self.server.browser_remote.action(payload,owner))
                 except BrowserError as error:return self.reply(error.status,{'error':str(error),'state':'unknown' if error.uncertain else 'rejected'},extra_headers=[('Retry-After','1')] if error.status==429 else None)
                 except (OSError,ValueError,TypeError,KeyError,subprocess.SubprocessError):return self.reply(503,{'error':'Browser control was interrupted. Refresh and check the page before another action.','state':'unknown'})
             if self.path=='/api/chat/connect':

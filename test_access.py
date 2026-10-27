@@ -193,22 +193,28 @@ class GatewayTests(unittest.TestCase):
         from unittest.mock import Mock
         browser=Mock()
         browser.catalog.return_value={'available':True,'tabs':[]}
+        browser.select.return_value={'available':True,'tabs':[],'selection':{'id':'page-1','revision':'chosen-page','source':'manual','available':True}}
         browser.snapshot.return_value={'id':'page-1','frame':'test-frame','image':'fake'}
         browser.action.return_value={'state':'applied'}
         with patch.object(self.remote,'browser_remote',browser):
             self.assertEqual(self.request('/api/browser')[0],401)
             self.assertEqual(self.request('/api/browser/frame?id=page-1')[0],401)
-            browser.catalog.assert_not_called();browser.snapshot.assert_not_called()
+            self.assertEqual(self.request('/api/browser/select','POST',{'chat_id':CHAT,'id':'page-1'})[0],401)
+            browser.catalog.assert_not_called();browser.snapshot.assert_not_called();browser.select.assert_not_called()
             cookie,_=self.pair()
             catalog=self.request('/api/browser',cookie=cookie);self.assertEqual(catalog[0],200)
             csrf=json.loads(catalog[2])['csrf']
             self.assertEqual(self.request('/api/browser/action','POST',{'action':'reload'},cookie=cookie)[0],403)
             browser.action.assert_not_called()
             self.assertEqual(self.request('/api/browser/frame?id=page-1&id=other',cookie=cookie)[0],400)
-            self.assertEqual(self.request('/api/browser/frame?id=page-1',cookie=cookie)[0],200)
+            self.assertEqual(self.request('/api/browser/frame?id=page-1',cookie=cookie)[0],400)
+            self.assertEqual(self.request('/api/browser/select','POST',{'chat_id':'','id':'page-1'},cookie=cookie,headers={'X-Companion-CSRF':csrf})[0],200)
+            self.assertEqual(self.request('/api/browser/frame?id=page-1&selection_revision=chosen-page',cookie=cookie)[0],200)
             owner=browser.snapshot.call_args.args[1]
             self.assertTrue(owner);self.assertNotEqual(owner,'local')
-            self.assertEqual(self.request('/api/browser/action','POST',{'id':'page-1','frame':'test-frame','action':'reload'},cookie=cookie,headers={'X-Companion-CSRF':csrf})[0],200)
+            self.assertEqual(browser.snapshot.call_args.kwargs,{'chat_id':'','selection_revision':'chosen-page'})
+            self.assertEqual(browser.select.call_args.args,('page-1',owner,''))
+            self.assertEqual(self.request('/api/browser/action','POST',{'id':'page-1','frame':'test-frame','chat_id':'','selection_revision':'chosen-page','action':'reload'},cookie=cookie,headers={'X-Companion-CSRF':csrf})[0],200)
             self.assertEqual(browser.action.call_args.args[1],owner)
             self.assertEqual(self.request('/browser',cookie=cookie)[0],200)
 

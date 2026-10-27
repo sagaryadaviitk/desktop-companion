@@ -8,7 +8,9 @@ For an existing installation, follow [After pulling an update](#after-pulling-an
 
 ## Browser pages on your phone
 
-Open **… → This browser → Browser** to view and interact with regular pages from the desktop browser. It uses your existing phone pairing, fresh screenshots and bounded controls; chat drafts stay in their original tab. Browser sharing is disabled until explicitly enabled on each Mac. Activation requires a desktop-app relaunch with a loopback browser connection; review [BROWSER.md](BROWSER.md) before doing that. A source update alone does not enable debugging or browser sharing.
+Open a chat and tap **Browser ↗** to view its existing Mac browser page in a new phone tab. Choose the page explicitly: the desktop connection does not expose verified chat ownership, and Companion never guesses or silently switches pages. The viewer retains the desktop layout with Fit, zoom/pan, Focus view, tap/swipe, navigation and text input. The original chat keeps its draft and photos. The general viewer remains under **… → This browser → Browser**.
+
+Browser sharing uses the existing phone pairing and fresh, single-use screenshot controls. It starts disabled on each Mac. Activation requires a desktop-app relaunch with a loopback browser connection; review [BROWSER.md](BROWSER.md) before doing that. Installing source alone does not enable debugging or browser sharing.
 
 ## Responsive updates and recovery
 

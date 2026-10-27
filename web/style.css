@@ -559,6 +559,7 @@ dialog{overscroll-behavior:contain}
 #new-photo-menu{left:0;bottom:calc(100% + 6px)}
 .new-chat-recovery{display:flex;gap:10px;flex-wrap:wrap}
 .chat-options{flex:none;min-width:40px;min-height:44px;padding:0 8px;border:0;background:transparent;border-radius:10px;font-size:17px;letter-spacing:1px;color:#637a88}
+.chat-browser-open{display:inline-flex;align-items:center;gap:5px;flex:none;min-height:44px;text-decoration:none}
 #chat-actions-dialog{width:min(440px,calc(100% - 24px));overflow-y:auto;max-height:calc(var(--app-height,100dvh) - 24px)}
 #chat-actions-title{overflow-wrap:anywhere;margin:12px 0;color:#657481;line-height:1.5}
 .chat-action-list{display:flex;flex-direction:column;gap:4px;margin:12px 0}.chat-action-list>button{min-height:50px;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:20px;background:#f8fafc;border:1px solid #e3e9ef;border-radius:10px;padding:10px 14px;color:#2e4555;font-size:14px}.chat-action-list>button:hover{background:#edf3f8}

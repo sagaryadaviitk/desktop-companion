@@ -87,8 +87,17 @@ function lockScreen(){
 }
 
 function showNotice(message){el("notice-text").textContent=message;el("notice").hidden=!message;}
+function updateBrowserLinks(){
+  const chat=selectedData,link=el('chat-browser-open'),url=new URL('/browser',location.origin);
+  if(chat?.id)url.searchParams.set('chat',chat.id);
+  link.hidden=!chat?.id;
+  link.href=url.pathname+url.search;
+  link.setAttribute('aria-label',chat?.id?`Open browser for ${chat.title||'this chat'} in a new tab`:'Open desktop browser in a new tab');
+  el('browser-open').href=url.pathname+url.search;
+}
 function updateComposer(){
   el('chat-options').disabled=!selectedData;
+  updateBrowserLinks();
   localEntry.select(selectedData?.id);
   const panel=el("messages"),atBottom=conversationScroll?.following()??panel.scrollHeight-panel.scrollTop-panel.clientHeight<100;
   const input=el("instruction"),available=Boolean(selectedData?.control?.available);
