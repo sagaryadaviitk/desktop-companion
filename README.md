@@ -94,4 +94,6 @@ Unattended mode and Locked Use are separate from ordinary phone access. Sleep ch
 
 `desktop_companion/` contains Python implementation modules; root Python command files are compatibility entrypoints. `web/` holds the browser UI, `native/` the Swift app, `tests/python/` and `tests/js/` the isolated tests, and `cloudflare_fallback/` an optional independently deployed outage page. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and verification.
 
-This is an experimental project with no published support or response-time commitment. For reproducible non-sensitive bugs, use the repository's issue tracker when available; do not put chat contents, credentials, pairing codes or private logs in an issue. No verified private vulnerability-reporting channel has been published yet; see [SECURITY.md](SECURITY.md).
+This is an experimental project with no published support or response-time commitment. For reproducible non-sensitive bugs, use the repository's issue tracker when available; do not put chat contents, credentials, pairing codes or private logs in an issue. Private vulnerability reporting is planned for public launch and must be enabled and verified first; see [SECURITY.md](SECURITY.md).
+
+The source is licensed under the [MIT License](LICENSE).

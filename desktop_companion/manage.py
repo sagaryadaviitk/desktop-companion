@@ -142,13 +142,13 @@ def bundle(output,root=ROOT):
             raise ValueError('A required source directory is missing or is a symlink. Export stopped.')
     files=[root/'desktop_companion'/name for name in ('__init__.py',*MODULES)]
     files.extend(root/name for name in LAUNCHERS)
-    files.extend(root/name for name in ('.gitignore','config.example.json','README.md','SETUP.md','COMPATIBILITY.md','LOCAL_ASSISTANT.md','SECURITY.md','local-settings.example.json'))
+    files.extend(root/name for name in ('.gitignore','config.example.json','README.md','SETUP.md','COMPATIBILITY.md','CONTRIBUTING.md','LOCAL_ASSISTANT.md','SECURITY.md','LICENSE','local-settings.example.json'))
     files.extend(root/'web'/name for name in WEB_ASSETS)
     files.extend(root/'native'/name for name in NATIVE_SOURCES)
     files.extend(root/'cloudflare_fallback'/name for name in FALLBACK_SOURCES)
     files.extend(root/'tests'/'python'/name for name in PYTHON_TESTS)
     files.extend(root/'tests'/'js'/name for name in JS_TESTS)
-    for name in ('.gitattributes','AGENTS.md','CONTRIBUTING.md','LICENSE','.github/workflows/checks.yml'):
+    for name in ('.gitattributes','AGENTS.md','.github/workflows/checks.yml'):
         path=root/name
         if path.exists() or path.is_symlink():files.append(path)
     for file in files:

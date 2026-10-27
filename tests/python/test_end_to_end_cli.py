@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import re
-import select
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 
@@ -37,7 +39,8 @@ class ExportedAppEndToEndTests(unittest.TestCase):
             fake_bin.mkdir()
             calls = sandbox / 'queue-calls.jsonl'
             cli = fake_bin / 'codex'
-            cli.write_text('''#!/usr/bin/env python3
+            cli_script = sandbox / 'fake-codex.py'
+            cli_script.write_text('''
 import json, os, sys
 args = sys.argv[1:]
 if args == ['queue', '--help']:
@@ -49,24 +52,47 @@ elif len(args) == 5 and args[0] == 'queue' and args[1] == '--thread' and args[3]
 else:
     sys.exit(1)
 ''')
+            # Use the same interpreter as the test, including on hosted macOS
+            # where /usr/bin/python3 can be an unrelated developer-tools shim.
+            cli.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' '
+                           + shlex.quote(str(cli_script)) + ' "$@"\n')
             cli.chmod(0o700)
             env = dict(os.environ)
             env.update(HOME=str(fake_home), CODEX_HOME=str(history_home),
                        PATH=str(fake_bin) + os.pathsep + '/usr/bin:/bin',
-                       COMPANION_TEST_CALL_LOG=str(calls), PYTHONDONTWRITEBYTECODE='1')
+                       COMPANION_TEST_CALL_LOG=str(calls), PYTHONDONTWRITEBYTECODE='1',
+                       PYTHONFAULTHANDLER='1')
             env.pop('PYTHONPATH', None)
+            stdout_path = sandbox / 'server-stdout.log'
+            stderr_path = sandbox / 'server-stderr.log'
+            stdout_file = stdout_path.open('w')
+            stderr_file = stderr_path.open('w')
             process = subprocess.Popen(
                 [sys.executable, '-u', str(root / 'companion.py'), '--port', '0',
                  '--remote-port', '0', '--codex-home', str(history_home)],
-                cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True,
+                cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=stdout_file, stderr=stderr_file,
             )
             try:
-                ready, _, _ = select.select([process.stdout], [], [], 15)
-                self.assertTrue(ready, 'Exported server did not start within 15 seconds')
-                line = process.stdout.readline()
-                match = re.search(r'http://127\.0\.0\.1:(\d+)', line)
-                self.assertIsNotNone(match, 'Server startup did not identify its local port')
+                deadline = time.monotonic() + 30
+                match = None
+                while time.monotonic() < deadline:
+                    match = re.search(r'http://127\.0\.0\.1:(\d+)', stdout_path.read_text(errors='replace'))
+                    if match or process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if not match:
+                    if process.poll() is None:
+                        # Capture every Python thread on a hang before stopping
+                        # this synthetic child, so CI can identify the blocker.
+                        process.send_signal(signal.SIGABRT)
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                    self.fail('Exported server did not report its port; exit=' + str(process.returncode)
+                              + '\nstdout:\n' + stdout_path.read_text(errors='replace')[-12000:]
+                              + '\nstderr:\n' + stderr_path.read_text(errors='replace')[-12000:])
                 local_port = int(match.group(1))
 
                 def request(port, path, method='GET', payload=None, headers=None):
@@ -123,12 +149,15 @@ else:
                 self.assertEqual(request(gateway_port, '/api/auth/logout', 'POST', {}, authorized)[0], 200)
                 self.assertEqual(request(gateway_port, '/api/chats', headers=paired)[0], 401)
             finally:
-                process.terminate()
+                if process.poll() is None:
+                    process.terminate()
                 try:
-                    process.communicate(timeout=5)
+                    process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
-                    process.communicate(timeout=5)
+                    process.wait(timeout=5)
+                stdout_file.close()
+                stderr_file.close()
 
 
 if __name__ == '__main__':

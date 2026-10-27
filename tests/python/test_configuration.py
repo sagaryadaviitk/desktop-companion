@@ -15,9 +15,31 @@ import subprocess
 from desktop_companion.configuration import load,save,validate
 from desktop_companion.companion import STATIC_FILES
 from desktop_companion.manage import (bundle, ROOT, WEB_ASSETS, NATIVE_SOURCES, FALLBACK_SOURCES,
-                                      PYTHON_TESTS, JS_TESTS, native_build_tools, doctor,
+                                      PYTHON_TESTS, JS_TESTS, MODULES, LAUNCHERS, native_build_tools, doctor,
                                       history_schema, cli_queue_capabilities, main)
 from test_companion import make_history
+
+def tracked_manifest_gaps(root):
+    groups = (('web', {'.js', '.css', '.html'}, WEB_ASSETS),
+              ('native', {'.swift'}, NATIVE_SOURCES),
+              ('cloudflare_fallback', {'.template', '.html', '.py', '.md'}, FALLBACK_SOURCES),
+              ('tests/python', {'.py'}, PYTHON_TESTS), ('tests/js', {'.cjs'}, JS_TESTS),
+              ('desktop_companion', {'.py'}, ('__init__.py', *MODULES)),
+              ('.', {'.py'}, LAUNCHERS))
+    raw = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z'])
+    paths = [Path(value) for value in os.fsdecode(raw).split('\0') if value]
+    gaps = {}
+    for directory, suffixes, manifest in groups:
+        base = Path(directory)
+        tracked = ({path.name for path in paths if path.parent == base and path.suffix in suffixes}
+                   if directory == '.' else
+                   {str(path.relative_to(base)) for path in paths
+                    if path.is_relative_to(base) and path.suffix in suffixes})
+        missing = tracked - set(manifest)
+        if missing:
+            gaps[directory] = missing
+    return gaps
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_clean_mac_defaults_to_local_and_preserves_explicit_settings(self):
@@ -43,17 +65,22 @@ class ConfigurationTests(unittest.TestCase):
         # Repository-only drift check. Exported source bundles need no Git metadata.
         if not (ROOT / '.git').exists() or not shutil.which('git'):
             self.skipTest('Git checkout required for tracked-file manifest drift check')
-        groups = (('web', {'.js', '.css', '.html'}, WEB_ASSETS),
-                  ('native', {'.swift'}, NATIVE_SOURCES),
-                  ('cloudflare_fallback', {'.template', '.html', '.py', '.md'}, FALLBACK_SOURCES),
-                  ('tests/python', {'.py'}, PYTHON_TESTS), ('tests/js', {'.cjs'}, JS_TESTS))
-        for directory, suffixes, manifest in groups:
-            with self.subTest(directory=directory):
-                raw = subprocess.check_output(['git', '-C', str(ROOT), 'ls-files', '-z', '--', directory])
-                paths = [Path(p) for p in os.fsdecode(raw).split('\0') if p]
-                tracked = {str(path.relative_to(directory)) for path in paths if path.suffix in suffixes}
-                missing = tracked - set(manifest)
-                self.assertFalse(missing, 'Tracked files omitted from export manifest: ' + ', '.join(sorted(missing)))
+        self.assertEqual(tracked_manifest_gaps(ROOT), {})
+
+    def test_manifest_drift_detects_tracked_package_and_root_python(self):
+        if not shutil.which('git'):
+            self.skipTest('Git required for temporary repository fixture')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True, capture_output=True)
+            (root / 'desktop_companion').mkdir()
+            (root / 'desktop_companion' / 'unlisted_module.py').write_text('# fixture')
+            (root / 'unlisted_launcher.py').write_text('# fixture')
+            subprocess.run(['git', '-C', str(root), 'add', 'desktop_companion/unlisted_module.py',
+                            'unlisted_launcher.py'], check=True, capture_output=True)
+            gaps = tracked_manifest_gaps(root)
+            self.assertEqual(gaps, {'desktop_companion': {'unlisted_module.py'},
+                                    '.': {'unlisted_launcher.py'}})
 
     def test_export_excludes_extra_files_and_reexports_without_git(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -142,6 +169,7 @@ class ConfigurationTests(unittest.TestCase):
                         self.assertFalse(output.exists())
             for target, mode in (('tests/python', 'empty'), ('tests/js', 'empty'),
                                  ('web/index.html', 'missing'), ('native/CompanionApp.swift', 'missing'),
+                                 ('CONTRIBUTING.md', 'missing'), ('LICENSE', 'missing'),
                                  ('tests/python/test_access.py', 'missing'), ('tests/js/test_appearance.cjs', 'missing')):
                 with self.subTest(target=target, mode=mode):
                     fixture = temp_root / ('fixture-' + target.replace('/', '-') + '-' + mode)
