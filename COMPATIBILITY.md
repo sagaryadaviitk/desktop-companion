@@ -7,7 +7,7 @@ Complete these checks on each destination Mac before relying on remote control. 
 - **Access:** this private repository requires an owner-granted GitHub invitation. Authentication alone does not grant access. Use your own signed-in desktop account and product entitlements.
 - **macOS:** the native control app declares **13.0** as its installation floor. That does not certify older OS/SDK combinations, every architecture, or the desktop product's own requirements.
 - **Tools:** Python **3.11+**, Git/GitHub CLI for cloning, and Apple Swift/macOS SDK tools for the optional native build. No pip packages or separate model API key are needed for desktop chats. Node **24** is for tests; Raycast is optional.
-- **Desktop integration:** a compatible native ChatGPT/Codex app must supply local history, a compatible bundled/PATH Codex CLI and live owner protocols. The adapter requires matching columns in `state_5.sqlite` (`threads`, `projects`, `project_roots`) and `thread_history_1.sqlite` (`thread_items`, `thread_turns`), plus exact IPC method/snapshot versions in `desktop_runtime.py`. Cloud-only/other-host chats are outside this adapter. There is no established desktop-version support range.
+- **Desktop integration:** a compatible native ChatGPT/Codex app must supply local history, a compatible bundled/PATH Codex CLI and live owner protocols. The adapter requires matching columns in `state_5.sqlite` (`threads`, `projects`, `project_roots`) and `thread_history_1.sqlite` (`thread_items`, `thread_turns`), plus exact IPC method/snapshot versions in `desktop_companion/desktop_runtime.py`. Cloud-only/other-host chats are outside this adapter. There is no established desktop-version support range.
 - **Phone access:** use `cloudflared`, your own Cloudflare domain/DNS permissions, and a unique hostname, tunnel and credential per Mac. The owning Mac needs an awake, logged-in session and network connectivity.
 
 `doctor` checks prerequisites, history columns and CLI capabilities; it does not certify sign-in, live IPC or delivery. App updates can break internal schemas/protocols. Resolve incompatibility rather than editing desktop databases or disabling security checks.
@@ -16,9 +16,9 @@ Complete these checks on each destination Mac before relying on remote control. 
 
 | Evidence | Verified scope and limits |
 | --- | --- |
-| Main CI at [`d41fc424`](https://github.com/sagaryadaviitk/desktop-companion/commit/d41fc424) | Passing isolated tests: macOS 15 Intel, Python 3.11/3.14, Node 24; native compilation without installation. Check CI for the commit you install. |
-| Original Mac inventory | macOS 27.0.1 (26A434), arm64; ChatGPT 26.1016.51333 (21161); bundled `codex-cli 0.163.0-alpha.11`; Swift 6.4/SDK 27.0; Homebrew Python 3.14.6. Installed versions, not fresh-install or every-feature certification. |
-| Historical live checks in README, 2026-10-20/21 | Bounded original-Mac delivery, photo/queue, layout and selected network/lock observations. These do not certify another Mac or later app builds. |
+| Main CI at [`5d0aae0`](https://github.com/sagaryadaviitk/desktop-companion/commit/5d0aae0) | Passing isolated tests: macOS 15 Intel, Python 3.11/3.14, Node 24; native compilation without installation. Check CI for the commit you install. |
+| Previously observed environment | macOS 27.0.1, arm64; ChatGPT 26.1016.51333; `codex-cli 0.163.0-alpha.11`; Swift 6.4/SDK 27.0; Python 3.14.6. Inventory only, not fresh-install or every-feature certification. |
+| Historical live checks, 2026-10-20/21 | Bounded delivery, photo/queue, layout and selected network/lock observations. These do not certify another Mac or later app builds. |
 
 No fresh-Mac installation was performed for this documentation revision.
 
@@ -33,8 +33,8 @@ Select `COMPANION_PYTHON` in this terminal using [SETUP prerequisites](SETUP.md#
 2. **Run isolated tests** with Node 24 installed; record these separately from live checks:
 
    ```sh
-   "$COMPANION_PYTHON" -m unittest discover -p 'test_*.py' -q
-   node --test test_*.cjs
+   "$COMPANION_PYTHON" -m unittest discover -s tests/python -p 'test_*.py' -q
+   node --test tests/js/test_*.cjs
    ```
 
 3. **Check local operation** after explicit service installation and opening the desktop app yourself:

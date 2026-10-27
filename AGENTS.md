@@ -20,8 +20,8 @@ This repository contains the Python desktop bridge, static mobile web UI, Swift 
 ## Validation
 
 - Run meaningful focused tests while iterating; run the Python and JavaScript suites before merging shared behavior changes:
-  - `python3 -m unittest discover -p 'test_*.py' -q`
-  - `node --test test_*.cjs`
+  - `python3 -m unittest discover -s tests/python -p 'test_*.py' -q`
+  - `node --test tests/js/test_*.cjs`
 - Keep tests independent of the host's app installation, history, remote configuration, network, and credentials. Use temporary fixtures and bounded fakes.
 - CI compiles the native app without installing it. Passing CI does not verify actual phone delivery, the physical keyboard, native haptics, lid-close connectivity, or interaction with a locked Mac. Report those separately from synthetic tests.
 - Check relevant light/dark phone layouts after UI changes. Preserve accessible text contrast, touch targets, drafts, and selected photos.

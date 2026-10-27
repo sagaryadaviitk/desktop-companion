@@ -117,7 +117,7 @@ For a recovery page that remains reachable independently of the Mac, follow [clo
 
 If an existing tunnel stops working after deployment, distinguish an established connection from a new handshake. A full-system restart closes existing tunnel connections; web-only deployment should preserve them. Verify local service health, component freshness, tunnel registration, and anonymous public authentication separately before declaring recovery. A public-probe failure with registered edges is not, by itself, a tunnel disconnect; see [Running and recovery](README.md#running-and-recovery).
 
-Managed-proxy/security investigations apply only to the affected Mac. Keep that Mac's diagnostics and any approved network adjustments local. A Mac without Zscaler does not need another Mac's Zscaler configuration. Source updates do not change system proxies, certificate trust or managed security policies. Inspection observed during a failed handshake is evidence to correlate with policy logs, not proof that inspection caused the failure.
+Keep network diagnostics private and investigate each Mac independently. Source updates do not change system proxies, certificate trust or managed security policies. An inspection observation alone does not prove why a connection failed.
 
 Use the private `tunnel-events.jsonl` lifecycle history to check why a connection was replaced. Network metadata changes now preserve an existing controller. The watchdog also preserves registered edge connections and gives an edge-less connector a five-minute recovery grace period; authentication bypass remains an immediate stop. Keep the tunnel client current through its trusted package manager. A successful reboot alone does not establish sustained connectivity or explain a later failure.
 
@@ -127,32 +127,29 @@ To return to local-only mode, run `"$COMPANION_PYTHON" manage.py configure --loc
 
 ## Update, validate, and export
 
-For a Git clone, follow [After pulling an update](README.md#after-pulling-an-update), including its one-time action for installations upgrading from `999f022` or the old recovery service. Keep `config.local.json` and `.state/` on the destination Mac; they contain machine settings and private runtime data. A source pull does not require copying another Mac's configuration, rerunning setup or changing its hostname.
+For a Git clone, follow [After pulling an update](README.md#after-pulling-an-update), including the package-layout restart and any applicable older-service upgrade action. Keep `config.local.json` and `.state/` on the destination Mac; they contain machine settings and private runtime data. A source pull does not require copying another Mac's configuration, rerunning setup or changing its hostname.
 
 A source-only ZIP has no Git history: obtain a reviewed replacement bundle and release/upgrade instructions from its owner. Preserve private state and do not overwrite a working installation or move the installed source folder during an active operation. Use a coordinated replacement/rollback plan for that folder, then apply the same changed-file runtime actions below. Do not run Git pull commands in an extracted ZIP.
 
 Rebuild the control app only after native changes. Python/web-server updates use `"$COMPANION_PYTHON" service.py restart-web` (or the native component's **Restart service** action), preserving the tunnel and awake guard. Static web assets and documentation need no service restart. Supervisor behavior or intentional machine-configuration changes require one full `"$COMPANION_PYTHON" service.py restart`. Changes to the installed LaunchAgent definition, startup guard, Python path or login-log location instead require `"$COMPANION_PYTHON" service.py install --background-install-approved`; it replaces the approved job and already restarts once. `restart` alone cannot update a job definition, and an additional restart after installation is unnecessary. Both full operations disconnect this Mac's tunnel briefly. Open tabs detect web updates; an older tab without update detection needs one full browser reload.
 
 ```sh
-"$COMPANION_PYTHON" -m unittest discover -p 'test_*.py'
-node --test test_*.cjs
+"$COMPANION_PYTHON" -m unittest discover -s tests/python -p 'test_*.py'
+node --test tests/js/test_*.cjs
 "$COMPANION_PYTHON" manage.py bundle --output Desktop-Companion-source.zip
 ```
 
 Node is needed only for JavaScript tests, not for running Companion. The allowlisted export includes source, documentation, example configuration, and tests. It excludes `.state`, local configuration, conversations, photos, browser sessions, pairing codes, tunnel credentials, logs, compiled apps, and old Slack setup artifacts. Build and pair independently on every new Mac.
 
+## Stop and remove
+
+To stop the service temporarily, run `"$COMPANION_PYTHON" service.py stop`. To stop it and remove the login job, run `"$COMPANION_PYTHON" service.py uninstall`. Uninstall retains app data, configuration, logs, the locally built app and Cloudflare resources. Revoke paired browser sessions and outstanding pairing codes using the native app or [CLI access management](#pair-without-the-native-control-app). To retire the hostname or tunnel, manage those resources separately in your Cloudflare account. Remove local files only after reviewing which state you want to retain. If you changed unattended power settings, restore your desired macOS settings separately; uninstall does not revert them.
+
 ## Layout
 
-- `web/`: the browser UI; clipboard attachments, prompt-first creation, appearance, component status, refresh gestures, Home Screen shell/caret behavior, and version updates have separate modules. Light/dark tokens and shared typography are in `theme.css`.
-- `companion.py`: HTTP routes and the read-only history adapter.
-- `desktop_runtime.py`, `runtime.py`, `new_chat.py`: bounded desktop/CLI integrations.
-- `access.py`, `inbox.py`, `photos.py`, `promotions.py`: Companion-owned private stores.
-- `configuration.py`, `service.py`, `control.py`, `manage.py`: machine configuration, supervision, and setup.
-- `system_status.py`: bounded tunnel health records and freshness checks, with no raw logs or credentials exposed.
-- `native/`, `build_app.py`: the locally built Raycast control app.
-- `native/Appearance.swift`: shared native colors and material fallbacks. The control app follows the Mac appearance, with a sidebar override. macOS 26+ builds use Liquid Glass for navigation/secondary controls when available; older compiler/runtime versions retain solid controls.
-- `test_*`: isolated Python/JavaScript regression checks.
+- `desktop_companion/`: Python implementation modules for the bridge, desktop integration, private stores, configuration and service.
+- Root Python entrypoints, including `manage.py`, `service.py` and `control.py`, preserve the documented CLI commands.
+- `web/`: mobile browser UI; `native/`: locally built Swift control app.
+- `tests/python/` and `tests/js/`: isolated regression tests. `cloudflare_fallback/` contains the optional independently deployed outage page.
 
-App updates can change the local history schema or coordination protocol. Run the setup check and tests after an update; passing installation checks does not prove native app access while the Mac is locked. Live approvals require an owner snapshot and the supported follower reply methods. Secure macOS dialogs, sign-ins, verification, permanent grants/policy changes and unsupported forms still require the desktop. See README for exact approval behavior and duplicate protection. Stop still requires the desktop. Send and model controls require a verified live desktop connection. Steer uses the existing desktop owner and records the actual accepting turn if it advances during delivery. Queue edit/delete use optimistic content checks with saved versions for recovery; avoid editing the same entry on both devices simultaneously because the native API has no cross-device CAS. Queue promotion removes the original before steering; uncertain outcomes remain reviewable and are never automatically replayed. Saved history alone does not enable live Steer.
-
-Personal chats use this Mac’s own `~/Library/Application Support/Desktop Companion/Chats` folder. Saved project targets are discovered from this Mac’s desktop history and verified before the first question runs. Browser appearance preferences are local to each browser; chats, photo drafts, pairing, request journals, and private configuration are not carried in the source export.
+App updates can change local history schemas and coordination protocols. Passing setup checks or automated tests does not prove phone delivery, native access while locked, or physical lid-close continuity. See [compatibility](COMPATIBILITY.md) and [README](README.md) for the feature and safety limits.

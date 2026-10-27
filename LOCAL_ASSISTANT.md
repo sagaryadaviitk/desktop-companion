@@ -58,7 +58,7 @@ A login background service normally does not inherit variables exported in an in
 
 TLS verification is always enabled. An optional profile `ca_file` can specify an absolute path to a trusted CA bundle when the normal Python trust store cannot verify an approved internal certificate. HTTP is permitted only for loopback testing. The API client connects directly, does not implement a configurable HTTP proxy, and never follows redirects; APIs requiring a proxy or redirect-based login need an approved network/authentication setup first. Redirect responses are returned for inspection without forwarding credentials.
 
-Start with `GET`/`HEAD`. Enabling `POST`, `PUT`, `PATCH`, or `DELETE` in a profile grants local chats access to those methods; enable them only for the intended environment. There is no per-request approval dialog in this first version. Request/response sizes and timeouts are bounded. Credentials are injected at execution time and redacted from model-visible responses and local history. API responses can contain other sensitive business data, so expose only appropriate endpoints.
+Start with `GET`/`HEAD`. Enabling `POST`, `PUT`, `PATCH`, or `DELETE` in a profile grants local chats access to those methods; enable them only for the intended environment. There is no per-request approval dialog in this first version. Request/response sizes and timeouts are bounded. Credentials are injected at execution time and known configured credentials are redacted from model-visible responses and local history; redaction is not a guarantee that arbitrary sensitive response data is removed. API responses can contain other sensitive business data, so expose only appropriate endpoints.
 
 API intent is durably recorded before network dispatch. No API request is automatically retried. An uncertain outcome stops the turn and remains reviewable; a request may have reached the service before its connection failed. Repeating the exact same tool action within one turn reuses its result. Starting a new user request is a new action and may execute again. This is duplicate protection inside Companion, not an exactly-once guarantee from an external API.
 
@@ -82,8 +82,6 @@ Run `"$COMPANION_PYTHON" local_smoke.py` for a repeatable local integration chec
 Repository checks:
 
 ```sh
-"$COMPANION_PYTHON" -m unittest discover -p 'test_*.py' -q
-node --test test_*.cjs
+"$COMPANION_PYTHON" -m unittest discover -s tests/python -p 'test_*.py' -q
+node --test tests/js/test_*.cjs
 ```
-
-The first integration proof used a temporary synthetic diagnostic API on loopback, with a nonce returned by that server. It did not call an office API or carry office credentials.

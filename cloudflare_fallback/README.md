@@ -20,7 +20,7 @@ The Worker substitutes only HTML GET/HEAD requests whose path is `/`, and only a
 - During an outage, both `/` and `/?chat=example` with `Accept: text/html` must return the recovery page and HTTP 503.
 - `/api/chats` must retain the origin/Cloudflare response, never the recovery HTML. An anonymous request must never expose conversation data.
 - After recovery, the actual pairing screen or authenticated app must pass through unchanged.
-- Run `node --test test_cloudflare_fallback.cjs` for isolated forwarding, no-replay, healthy-response, and preview tests.
+- Run `node --test tests/js/test_cloudflare_fallback.cjs` for isolated forwarding, no-replay, healthy-response, and preview tests.
 
 The page is static: it cannot know battery state, whether work finished, or when connectivity will return. Automatic recovery runs on the Mac. A truly sleeping, shut-down, or discharged Mac cannot run the supervisor. Saved Wi-Fi Auto-Join is managed by macOS; the supervisor reconnects the tunnel after a usable interface returns.
 

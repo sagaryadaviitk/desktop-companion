@@ -57,9 +57,9 @@ jobs:
           print('Tracked source contains no prohibited runtime paths.')
           PY
       - name: Run Python tests
-        run: python -m unittest discover -p 'test_*.py' -q
+        run: python -m unittest discover -s tests/python -p 'test_*.py' -q
       - name: Run JavaScript tests
-        run: node --test test_*.cjs
+        run: node --test tests/js/test_*.cjs
       - name: Compile native control app without installing it
         if: matrix.python == '3.14'
         run: >-
