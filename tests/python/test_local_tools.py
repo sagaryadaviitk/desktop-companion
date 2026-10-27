@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from desktop_companion.local_tools import LocalTools
+from desktop_companion.http_server import LoopbackHTTPServer
 
 
 class FakeAPI(http.server.BaseHTTPRequestHandler):
@@ -66,6 +67,17 @@ class FakeAPI(http.server.BaseHTTPRequestHandler):
     do_DELETE = handle_request
 
 
+class LoopbackListenerTests(unittest.TestCase):
+    def test_numeric_loopback_bind_does_not_attempt_reverse_dns(self):
+        with patch('socket.getfqdn', side_effect=AssertionError('reverse DNS lookup')):
+            server = LoopbackHTTPServer(('127.0.0.1', 0), FakeAPI)
+            try:
+                self.assertEqual(server.server_name, '127.0.0.1')
+                self.assertGreater(server.server_port, 0)
+            finally:
+                server.server_close()
+
+
 class LocalToolsTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -76,7 +88,7 @@ class LocalToolsTests(unittest.TestCase):
         self.token = self.workspace / 'office-token.txt'
         self.token.write_text('test-api-key\n')
         self.token.chmod(0o600)
-        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), FakeAPI)
+        self.server = LoopbackHTTPServer(('127.0.0.1', 0), FakeAPI)
         self.server.requests = []
         self.server.observed_states = []
         self.server.lock = threading.Lock()

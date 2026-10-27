@@ -16,7 +16,8 @@ import subprocess
 import threading
 import time
 from email.utils import formatdate
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from desktop_companion.http_server import LoopbackHTTPServer
 from http.cookies import CookieError, SimpleCookie
 from urllib.parse import parse_qs, urlsplit
 
@@ -645,7 +646,7 @@ class CommandJournal:
             return result
 
 
-class CompanionServer(ThreadingHTTPServer):
+class CompanionServer(LoopbackHTTPServer):
     daemon_threads = True
     request_queue_size = 32
 

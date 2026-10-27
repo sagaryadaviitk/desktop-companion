@@ -4,7 +4,8 @@ Only loopback servers and disposable fake data are used. No existing chats,
 settings, skill libraries, office APIs, credentials or model downloads change.
 """
 import argparse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from desktop_companion.http_server import LoopbackHTTPServer
 import json
 from pathlib import Path
 import shutil
@@ -33,7 +34,7 @@ def verify(endpoint=DEFAULT_ENDPOINT, model=DEFAULT_MODEL):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers(); self.wfile.write(body)
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Diagnostic)
+    server = LoopbackHTTPServer(('127.0.0.1', 0), Diagnostic)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     root = Path(tempfile.mkdtemp(prefix='companion-local-smoke-')); root.chmod(0o700)
     assistant = None

@@ -17,7 +17,7 @@ import zipfile
 from desktop_companion.configuration import load,save,ROOT,FILENAME
 
 MODULES=('access.py','approvals.py','build_app.py','companion.py','computer_use.py','configuration.py',
-         'control.py','desktop_runtime.py','inbox.py','local_assistant.py','local_forks.py','local_settings.py','local_smoke.py','local_tools.py','manage.py','media.py','new_chat.py','photos.py',
+         'control.py','desktop_runtime.py','http_server.py','inbox.py','local_assistant.py','local_forks.py','local_settings.py','local_smoke.py','local_tools.py','manage.py','media.py','new_chat.py','photos.py',
          'power.py','promotions.py','questions.py','read_cache.py','remote_access.py','runtime.py','service.py','system_status.py')
 LAUNCHERS=('build_app.py','companion.py','control.py','local_settings.py','local_smoke.py',
            'manage.py','media.py','remote_access.py','service.py')
@@ -29,7 +29,7 @@ NATIVE_SOURCES=('CompanionApp.swift','Appearance.swift','SystemMap.swift','Contr
 FALLBACK_SOURCES=('worker.mjs.template','offline.html','build.py','README.md')
 PYTHON_TESTS=('test_access.py','test_approvals.py','test_build_app.py','test_companion.py',
               'test_computer_use.py','test_configuration.py','test_control.py','test_desktop_runtime.py',
-              'test_end_to_end_cli.py','test_inbox.py','test_local_assistant.py','test_local_forks.py',
+              'test_end_to_end_cli.py','test_http_server.py','test_inbox.py','test_local_assistant.py','test_local_forks.py',
               'test_local_tools.py','test_media.py','test_native_policies.py','test_new_chat.py',
               'test_photos.py','test_power.py','test_questions.py','test_queue_controls.py',
               'test_read_cache.py','test_remote_access.py','test_runtime.py','test_service.py',
