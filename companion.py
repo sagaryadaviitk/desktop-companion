@@ -161,8 +161,39 @@ class History:
         return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
     def active_candidates(self):
+        with readonly_db(self.state) as connection:
+            metadata=self._thread_metadata_columns(connection)
+            internal={row['id'] for row in connection.execute('SELECT id,agent_path,'+metadata+' FROM threads') if self._thread_kind(row)=='internal'}
         with readonly_db(self.history) as connection:
-            return [row[0] for row in connection.execute("SELECT t.thread_id FROM thread_turns t JOIN (SELECT thread_id,MAX(rollout_ordinal) latest FROM thread_turns GROUP BY thread_id) l ON l.thread_id=t.thread_id AND l.latest=t.rollout_ordinal WHERE t.status='inProgress' ORDER BY t.started_at DESC LIMIT 12")]
+            with closing(connection.execute("SELECT t.thread_id FROM thread_turns t JOIN (SELECT thread_id,MAX(rollout_ordinal) latest FROM thread_turns GROUP BY thread_id) l ON l.thread_id=t.thread_id AND l.latest=t.rollout_ordinal WHERE t.status='inProgress' ORDER BY t.started_at DESC")) as cursor:
+                candidates=[]
+                for row in cursor:
+                    if row[0] not in internal:candidates.append(row[0])
+                    if len(candidates)==12:break
+                return candidates
+
+    @staticmethod
+    def _thread_metadata_columns(connection):
+        # Older desktop schemas do not have both source fields.
+        columns={column['name'] for column in connection.execute('PRAGMA table_info(threads)')}
+        return ','.join(name if name in columns else 'NULL AS '+name for name in ('source','thread_source'))
+
+    @staticmethod
+    def _thread_kind(row):
+        source=row['source']
+        if isinstance(source,str):
+            try:source=json.loads(source)
+            except (ValueError,TypeError):source=None
+        subagent=source.get('subagent') if isinstance(source,dict) else None
+        # Internal utility reviews are not conversations, even when they lack a path
+        # or were recorded by older builds as generic subagents.
+        if row['thread_source']=='guardian_review' or (isinstance(subagent,dict) and subagent.get('other')=='guardian'):
+            return 'internal'
+        if (row['thread_source']=='subagent'
+                or (isinstance(source,dict) and 'subagent' in source)
+                or (row['agent_path'] and row['agent_path']!='/root')):
+            return 'subagent'
+        return 'main'
 
     @staticmethod
     def _project_roots(connection):
@@ -190,20 +221,21 @@ class History:
             "updated_at": row["updated_at_ms"] or row["updated_at"] * 1000,
             "pinned": bool(row["is_pinned"]),
             "archived": bool(row["archived"]),
-            "subagent": bool(row["agent_path"] and row["agent_path"] not in ("", "/root")),
+            "subagent": self._thread_kind(row)!='main',
             "project_key": project_keys[0],"project_keys":project_keys,
         }
 
     def list_threads(self, include_archived=False, include_children=False):
         with readonly_db(self.state) as connection:
             roots=self._project_roots(connection)
+            metadata=self._thread_metadata_columns(connection)
             rows = connection.execute(
-                "SELECT id,name,title,cwd,updated_at,updated_at_ms,recency_at_ms,is_pinned,archived,agent_path,project_id,model "
+                "SELECT id,name,title,cwd,updated_at,updated_at_ms,recency_at_ms,is_pinned,archived,agent_path,project_id,model,"+metadata+" "
                 "FROM threads WHERE 1=1 "
                 + ("AND archived=0 " if not include_archived else "")
-                + ("AND (agent_path IS NULL OR agent_path='' OR agent_path='/root') " if not include_children else "")
                 + "ORDER BY COALESCE(recency_at_ms,updated_at_ms,updated_at*1000) DESC,id DESC"
             ).fetchall()
+            rows=[row for row in rows if self._thread_kind(row)!='internal' and (include_children or self._thread_kind(row)=='main')]
             receipts={}
             if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_read_receipts'").fetchone():
                 published='last_published_turn' if any(column['name']=='last_published_turn' for column in connection.execute('PRAGMA table_info(thread_read_receipts)')) else 'NULL AS last_published_turn'
@@ -307,9 +339,10 @@ class History:
             raise ValueError("Invalid history cursor.")
         with readonly_db(self.state) as connection:
             roots=self._project_roots(connection)
+            metadata=self._thread_metadata_columns(connection)
             effort='reasoning_effort' if any(column['name']=='reasoning_effort' for column in connection.execute('PRAGMA table_info(threads)')) else 'NULL AS reasoning_effort'
             row = connection.execute(
-                "SELECT id,name,title,cwd,updated_at,updated_at_ms,is_pinned,archived,agent_path,project_id,model,git_branch,"+effort+" FROM threads "
+                "SELECT id,name,title,cwd,updated_at,updated_at_ms,is_pinned,archived,agent_path,project_id,model,git_branch,"+effort+","+metadata+" FROM threads "
                 "WHERE id=?", (thread_id,)
             ).fetchone()
         if row is None:

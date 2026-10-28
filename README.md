@@ -22,6 +22,12 @@ Use the [changed-file update table](#after-pulling-an-update) to apply a release
 
 A verified, resumed desktop owner is connected even if its activity snapshot is too large or temporarily unreadable. The button disappears in that case, while activity is explicitly unknown. Queue and verified model controls remain available; Send, Steer and live approvals still require their existing fresh state checks. Oversized activity observations retain the 32 MiB frame limit and use a bounded, per-owner 30-second cooldown to avoid repeatedly serializing a huge history. This cooldown never substitutes for action preflight. This fix needs a web-service restart and a browser update; no native rebuild or tunnel restart is needed.
 
+## Internal approval reviews in the chat list
+
+Guardian approval-review sessions are excluded from Companion catalogs, unread counts, project totals, and live-status candidates. Both current `guardian_review` metadata and older Guardian subagent sources are recognized. Delegated subagents without an agent path are classified from desktop source metadata and remain available under **Subagent chats**. User, automation, and agent-created main chats remain visible; titles do not determine visibility. Desktop history is retained read-only, including direct diagnostic access to review sessions.
+
+This Python adapter update requires `python3 service.py restart-web`; no native rebuild or tunnel restart is needed.
+
 ## Install on a second Mac
 
 The source is in the **private** repository [sagaryadaviitk/desktop-companion](https://github.com/sagaryadaviitk/desktop-companion). The owner must grant your GitHub account access before cloning. Each Mac runs independently; Git shares code, not chats, sign-ins, settings, pairing, or credentials.
