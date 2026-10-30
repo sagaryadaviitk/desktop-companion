@@ -59,9 +59,9 @@ class RecoveryTests(unittest.TestCase):
         children={'server':web,'tunnel':tunnel,'awake':failed}
         budget=service.RecoveryBudget()
         with patch('service.write_runtime'),patch('service.start_awake',return_value=replacement) as start,patch('service.stop_children') as stop:
-            retry=service.recover_awake(children,0,100,budget)
+            retry=service.recover_awake(children,0,100,budget,{"source":"adapter"})
             self.assertEqual(retry,103);start.assert_not_called()
-            service.recover_awake(children,retry,103,budget)
+            service.recover_awake(children,retry,103,budget,{"source":"adapter"})
             start.assert_called_once();stop.assert_not_called()
         self.assertIs(children['server'],web);self.assertIs(children['tunnel'],tunnel)
         self.assertIs(children['awake'],replacement)
@@ -90,7 +90,7 @@ class RecoveryTests(unittest.TestCase):
     def test_awake_spawn_failure_is_contained_on_first_start(self):
         budget=service.RecoveryBudget();children={'server':Mock(),'tunnel':Mock()}
         with patch('service.write_runtime'),patch('service.start_awake',side_effect=OSError('fixture')),patch('service.stop_children') as stop:
-            self.assertEqual(service.recover_awake(children,0,100,budget),103)
+            self.assertEqual(service.recover_awake(children,0,100,budget,{"source":"adapter"}),103)
         self.assertEqual(set(children),{'server','tunnel'});stop.assert_not_called()
 
     def test_tunnel_spawn_failure_is_contained(self):
@@ -239,7 +239,7 @@ class InstallationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             (root/'service.py').write_text(Path(service.__file__).read_text())
-            (root/'power.py').write_text('AWAKE_COMMAND=[]')
+            (root/'power.py').write_text('AWAKE_COMMAND=[]\ndef read_battery_state(): return {}\ndef should_keep_awake(state): return False')
             (root/'configuration.py').write_text('def load(root): raise ValueError("invalid fixture")')
             (root/'system_status.py').write_text('publish=read_record=record_event=None')
             result=subprocess.run([sys.executable,str(root/'service.py'),'run'],cwd=root,capture_output=True,text=True,timeout=5)
@@ -253,7 +253,7 @@ class InstallationTests(unittest.TestCase):
             web=Mock();web.poll.return_value=None
             response=Mock();response.__enter__=Mock(return_value=io.StringIO(json.dumps({'gateway_port':8766,'authentication_required':True})));response.__exit__=Mock(return_value=False)
             config=Mock(remote_enabled=False)
-            with patch.object(service,'STATE',root),patch.object(service,'CONFIG',config),patch('service.threading.Event',return_value=stop),patch('service.signal.signal'),patch('service.os.umask'),patch('service.fcntl.flock'),patch('service.start_server',return_value=web),patch('service.start_awake',side_effect=OSError('fixture')),patch('service.urlopen',return_value=response),patch('service.write_runtime'),patch('service.record_event'),patch('service.consume_web_restart',return_value=False),patch('service.network_state',return_value=None),patch('service.subprocess.run') as run,patch('service.stop_children') as cleanup:
+            with patch.object(service,'STATE',root),patch.object(service,'CONFIG',config),patch('service.threading.Event',return_value=stop),patch('service.signal.signal'),patch('service.os.umask'),patch('service.fcntl.flock'),patch('service.start_server',return_value=web),patch('service.start_awake',side_effect=OSError('fixture')),patch('service.read_battery_state',return_value={'source':'adapter'}),patch('service.urlopen',return_value=response),patch('service.write_runtime'),patch('service.record_event'),patch('service.consume_web_restart',return_value=False),patch('service.network_state',return_value=None),patch('service.subprocess.run') as run,patch('service.stop_children') as cleanup:
                 service.supervise()
             run.assert_not_called()
             cleanup.assert_called_once_with({'server':web})

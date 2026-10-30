@@ -10,13 +10,105 @@ struct UnattendedSettings: Equatable {
 
     var command: String? {
         guard Self.timeouts.contains(batteryMinutes), Self.timeouts.contains(adapterMinutes) else { return nil }
-        // Only bounded integers and fixed executables enter the administrator script.
-        return "/usr/bin/pmset -b displaysleep \(batteryMinutes) && /usr/bin/pmset -c displaysleep \(adapterMinutes) && /usr/bin/pmset -a disablesleep \(keepWorking ? 1 : 0)"
+        return PowerGuard.installCommand(enabled: keepWorking, battery: batteryMinutes, adapter: adapterMinutes)
     }
-    func matches(keepWorking: Bool?, battery: Int?, adapter: Int?) -> Bool {
-        keepWorking == self.keepWorking && battery == batteryMinutes && adapter == adapterMinutes
+    func matches(keepWorking: Bool?, battery: Int?, adapter: Int?, cutoff: Int? = nil, source: String? = nil, percent: Int? = nil) -> Bool {
+        let awake = source == "adapter" || (source == "battery" && (percent.map { (20...100).contains($0) } ?? false))
+        return keepWorking == (self.keepWorking && awake) &&
+            (self.keepWorking ? cutoff == 20 : cutoff == nil) &&
+            battery == batteryMinutes && adapter == adapterMinutes
     }
 }
+
+enum PowerGuard {
+    static let label = "me.sagaryadav.desktop-companion.power"
+    static let helper = "/Library/PrivilegedHelperTools/" + label
+    static let plist = "/Library/LaunchDaemons/" + label + ".plist"
+    // launchd executes a root-owned copy, never code in a writable checkout.
+    static let script = #"""
+#!/bin/sh
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+LC_ALL=C
+export LC_ALL
+desired() {
+    case "$1" in
+        adapter) echo 1 ;;
+        battery)
+            case "$2" in ''|*[!0-9]*|????*) echo 0; return ;; esac
+            if [ "$2" -ge 20 ] && [ "$2" -le 100 ]; then echo 1; else echo 0; fi ;;
+        *) echo 0 ;;
+    esac
+}
+if [ "${1-}" = --decide ]; then desired "${2-}" "${3-}"; exit; fi
+status=/var/run/me.sagaryadav.desktop-companion.power.status
+cleanup() {
+    /usr/bin/pmset -a disablesleep 0 || :
+    /bin/rm -f "$status"
+}
+trap cleanup EXIT
+trap 'exit 0' HUP INT TERM
+while :; do
+    snapshot=$(/usr/bin/pmset -g batt) || snapshot=''
+    source=unknown
+    case "$snapshot" in
+        "Now drawing from 'AC Power'"*) source=adapter ;;
+        "Now drawing from 'Battery Power'"*) source=battery ;;
+    esac
+    percent=$(printf '%s\n' "$snapshot" | /usr/bin/sed -nE 's/.*[[:space:]]([0-9]{1,3})%;.*/\1/p' | /usr/bin/head -1)
+    target=$(desired "$source" "$percent")
+    current=$(/usr/bin/pmset -g | /usr/bin/awk '$1 == "SleepDisabled" {print $2; exit}')
+    if [ "$current" != "$target" ]; then /usr/bin/pmset -a disablesleep "$target"; fi
+    temporary=$(/usr/bin/mktemp "$status.XXXXXX")
+    printf '%s %s\n' "$(/bin/date +%s)" "$target" > "$temporary"
+    /bin/chmod 644 "$temporary"
+    /bin/mv -f "$temporary" "$status"
+    /bin/sleep 15
+done
+"""#
+
+    static func installCommand(enabled: Bool, battery: Int, adapter: Int) -> String {
+        let definition: [String: Any] = ["Label": label, "ProgramArguments": [helper], "RunAtLoad": true,
+                                       "KeepAlive": true, "ThrottleInterval": 10, "ExitTimeOut": 20]
+        let plistData = try! PropertyListSerialization.data(fromPropertyList: definition, format: .xml, options: 0)
+        let enable = """
+/bin/mkdir -p /Library/PrivilegedHelperTools
+test ! -L /Library/PrivilegedHelperTools
+test ! -L \(helper)
+test ! -L \(plist)
+printf '%s' '\(Data(script.utf8).base64EncodedString())' | /usr/bin/base64 -D > \(helper)
+/usr/sbin/chown root:wheel \(helper)
+/bin/chmod 755 \(helper)
+printf '%s' '\(plistData.base64EncodedString())' | /usr/bin/base64 -D > \(plist)
+/usr/sbin/chown root:wheel \(plist)
+/bin/chmod 644 \(plist)
+/bin/launchctl enable system/\(label)
+/bin/launchctl bootstrap system \(plist)
+for attempt in 1 2 3 4 5; do
+    test -f /var/run/\(label).status && break
+    /bin/sleep 1
+done
+test -f /var/run/\(label).status
+"""
+        let disable = "/bin/rm -f \(helper) \(plist)"
+        let install = """
+set -eu
+# Replace the legacy permanent override with the managed policy.
+if /bin/launchctl print system/\(label) >/dev/null 2>&1; then
+    /bin/launchctl bootout system/\(label)
+fi
+/usr/bin/pmset -a disablesleep 0
+/bin/rm -f /var/run/\(label).status
+\(enabled ? enable : disable)
+/usr/bin/pmset -b displaysleep \(battery)
+/usr/bin/pmset -c displaysleep \(adapter)
+"""
+        // No dynamic shell paths or quoting enter the AppleScript string.
+        return "printf '%s' '\(Data(install.utf8).base64EncodedString())' | /usr/bin/base64 -D | /bin/sh"
+    }
+}
+
 
 enum StatusFreshness {
     static func isFresh(checkedAt: Double?, failed: Bool, now: Double) -> Bool {
