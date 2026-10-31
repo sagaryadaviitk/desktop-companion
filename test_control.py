@@ -112,6 +112,15 @@ class NativeControlTests(unittest.TestCase):
         self.assertIsNotNone(value['access_error'])
         self.assertFalse(value['can_pair'])
 
+    def test_managed_lid_readiness_requires_both_fresh_cutoff_and_actual_sleep_setting(self):
+        failure=subprocess.CompletedProcess([],1,'','')
+        for percent,disabled,cutoff,expected in [(80,True,20,'ready'),(19,False,20,'ready'),(80,False,20,'warning'),(19,True,20,'warning'),(80,True,None,'warning')]:
+            with self.subTest(percent=percent,disabled=disabled,cutoff=cutoff):
+                state={'source':'battery','battery_percent':percent,'closed_lid_enabled':disabled,'low_battery_cutoff_percent':cutoff}
+                with patch('control.service.launchctl',return_value=failure),patch('control.local_json',return_value=None),patch('control.subprocess.run',return_value=failure),patch('control.read_power_state',return_value=state):
+                    value=control.read_snapshot(self.root)
+                self.assertEqual(next(item for item in value['components'] if item['id']=='lid')['state'],expected)
+
     def test_snapshot_omits_session_tokens_and_local_csrf(self):
         store=AccessStore(self.root/'.state'/'access.sqlite')
         token,session=store.exchange(store.create_pairing()['code'],'Fixture phone')

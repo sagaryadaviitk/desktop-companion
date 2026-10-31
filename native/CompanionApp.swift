@@ -35,6 +35,7 @@ struct PowerSnapshot: Decodable {
     let lid_closed, closed_lid_enabled: Bool?
     let lock_immediate: Bool?
     let display_sleep_battery_minutes, display_sleep_adapter_minutes: Int?
+    let low_battery_cutoff_percent: Int?
     let idle_guard_active: Bool
 }
 struct ComputerUseSnapshot: Decodable {
@@ -168,9 +169,9 @@ final class ControlModel: ObservableObject {
                 if self.statusReadFailed { self.notice = "Connection restored. Status is current."; self.error = false }
                 self.statusReadFailed = false
                 self.statusClock = Date()
-                if let expected = self.expectedPowerSettings, expected.matches(keepWorking: value.power?.closed_lid_enabled, battery: value.power?.display_sleep_battery_minutes, adapter: value.power?.display_sleep_adapter_minutes) {
+                if let expected = self.expectedPowerSettings, expected.matches(keepWorking: value.power?.closed_lid_enabled, battery: value.power?.display_sleep_battery_minutes, adapter: value.power?.display_sleep_adapter_minutes, cutoff: value.power?.low_battery_cutoff_percent, source: value.power?.source, percent: value.power?.battery_percent) {
                     self.expectedPowerSettings = nil
-                    self.notice = "Settings verified: screen off after \(expected.batteryMinutes) min on battery and \(expected.adapterMinutes) min on power. " + (expected.keepWorking ? "Background work can continue with the lid closed." : "Normal lid-close sleep is restored.")
+                    self.notice = "Settings verified: screen off after \(expected.batteryMinutes) min on battery and \(expected.adapterMinutes) min on power. " + (expected.keepWorking ? "Closed-lid mode is managed with a 20% battery cutoff." : "Normal lid-close sleep is restored.")
                     self.error = false
                 } else if self.expectedPowerSettings != nil {
                     self.expectedPowerSettings = nil
@@ -474,7 +475,7 @@ struct ControlView: View {
     @AppStorage("unattended-adapter-minutes") private var adapterMinutes = UnattendedSettings.defaultAdapter
     @AppStorage("unattended-keep-working") private var keepWorking = true
     private var selectedPowerSettings: UnattendedSettings { UnattendedSettings(keepWorking: keepWorking, batteryMinutes: batteryMinutes, adapterMinutes: adapterMinutes) }
-    private var powerSettingsApplied: Bool { !model.statusStale && selectedPowerSettings.matches(keepWorking: model.snapshot?.power?.closed_lid_enabled, battery: model.snapshot?.power?.display_sleep_battery_minutes, adapter: model.snapshot?.power?.display_sleep_adapter_minutes) }
+    private var powerSettingsApplied: Bool { !model.statusStale && selectedPowerSettings.matches(keepWorking: model.snapshot?.power?.closed_lid_enabled, battery: model.snapshot?.power?.display_sleep_battery_minutes, adapter: model.snapshot?.power?.display_sleep_adapter_minutes, cutoff: model.snapshot?.power?.low_battery_cutoff_percent, source: model.snapshot?.power?.source, percent: model.snapshot?.power?.battery_percent) }
     private var attentionCount: Int { model.components.filter { $0.state == "warning" || $0.state == "stopped" }.count }
     private var overviewTitle: String {
         guard model.snapshot != nil else { return "Checking your system" }
@@ -661,7 +662,7 @@ struct ControlView: View {
                     StatusPill(state: model.statusStale ? "unknown" : model.snapshot?.power?.closed_lid_enabled == true ? "ready" : "disabled")
                 }
                 Toggle("Keep working when the lid is closed", isOn: $keepWorking).font(.system(size: 14, weight: .medium)).disabled(model.busy)
-                Text(keepWorking ? "Your screen can turn off and lock while chats continue on battery or power." : "Closing the lid will use normal macOS sleep behavior. Phone access pauses while the Mac sleeps.").font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(3)
+                Text(keepWorking ? "Your screen can turn off while chats continue on battery or power. Below 20% on battery, Companion releases its keep-awake guard and restores normal sleep." : "Closing the lid will use normal macOS sleep behavior. Phone access pauses while the Mac sleeps.").font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(3)
                 Divider()
                 Text("Screen off & lock").font(.system(size: 15, weight: .semibold))
                 HStack(spacing: 24) {
@@ -677,14 +678,14 @@ struct ControlView: View {
                     Button(powerSettingsApplied ? "Settings applied" : "Apply settings…") { model.applyPowerSettings(selectedPowerSettings) }.companionControl(prominent: true).controlSize(.large).disabled(model.busy || powerSettingsApplied || selectedPowerSettings.command == nil)
                     Button("Lock screen now") { model.lockNow() }.controlSize(.large).disabled(model.busy || model.statusStale || model.snapshot?.power?.lock_immediate != true)
                 }
-                Text("macOS asks for administrator authentication. Lid behavior is system-wide and remains set after Companion closes; switch it off here to restore normal lid sleep. No low-battery cutoff is configured.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
+                Text("macOS asks for administrator authentication on each Mac. A local power helper checks every 15 seconds, including after the control app closes. Below 20% on battery, or if power cannot be read, normal sleep is restored. Switch this off and apply to remove the helper.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
                 if let power = model.snapshot?.power {
                     Text("\(model.statusStale ? "Last known" : "Currently applied"): battery \(power.display_sleep_battery_minutes.map { "\($0) min" } ?? "unknown") · plugged in \(power.display_sleep_adapter_minutes.map { "\($0) min" } ?? "unknown")").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }.padding(22).companionCard()
             VStack(alignment: .leading, spacing: 12) {
                 Text("Ready for unattended work?").font(.system(size: 16, weight: .semibold))
-                readinessRow("Background work", ready: model.snapshot?.power?.idle_guard_active == true, detail: "Companion keeps the Mac awake while it runs.")
+                readinessRow("Background work", ready: model.components.first(where: { $0.id == "awake" })?.state == "ready", detail: "Companion releases its idle-sleep guard below 20% on battery.")
                 readinessRow("Phone connection", ready: model.components.first(where: {$0.id == "phone"})?.state == "ready", detail: "Checks the route from your phone to this Mac.")
                 Button("View system status") { model.page = "overview" }.controlSize(.large)
             }.padding(22).companionCard()

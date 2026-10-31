@@ -21,7 +21,7 @@ from urllib.request import urlopen
 
 # A missing/quarantined dependency needs operator repair, not a login restart loop.
 try:
-    from power import AWAKE_COMMAND
+    from power import AWAKE_COMMAND, read_battery_state, should_keep_awake
     from configuration import load
     from system_status import publish,read_record,record_event
 except (ImportError,OSError,SyntaxError):
@@ -183,7 +183,15 @@ def start_awake():
     return subprocess.Popen(AWAKE_COMMAND)
 
 
-def recover_awake(children,retry_at,now,budget):
+def recover_awake(children,retry_at,now,budget,power_state):
+    if not should_keep_awake(power_state):
+        process = children.pop('awake', None)
+        if process:
+            if process.poll() is None: stop_children({'awake': process})
+            else: process.wait()
+            write_runtime(children)
+        budget.reset()
+        return 0
     return recover_process(children,'awake',start_awake,retry_at,now,budget)
 
 
@@ -316,7 +324,9 @@ def supervise():
             server_budget=RecoveryBudget();server_budget.started(now)
             awake_budget=RecoveryBudget()
             tunnel_budget=RecoveryBudget(initial_delay=30,max_delay=300,max_failures=None)
-            awake_retry_at=recover_awake(children,0,now,awake_budget)
+            power_state=read_battery_state()
+            next_power_check=now+5
+            awake_retry_at=recover_awake(children,0,now,awake_budget,power_state)
             tunnel_retry_at=0
             if CONFIG.remote_enabled:
                 tunnel_retry_at=recover_tunnel(children,0,now,budget=tunnel_budget)
@@ -328,7 +338,9 @@ def supervise():
             while not stopping.wait(1):
                 now=time.monotonic();reconnect=False
                 server_retry_at=recover_server(children,server_retry_at,now,restart=consume_web_restart(),budget=server_budget)
-                awake_retry_at=recover_awake(children,awake_retry_at,now,awake_budget)
+                if now>=next_power_check:
+                    power_state=read_battery_state();next_power_check=now+5
+                awake_retry_at=recover_awake(children,awake_retry_at,now,awake_budget,power_state)
                 if now>=next_network_check:
                     reconnect=network.observe(network_state(),now);next_network_check=now+5
                 if CONFIG.remote_enabled:

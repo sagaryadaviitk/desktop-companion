@@ -15,7 +15,7 @@ from access import AccessStore, RemoteSettings
 from remote_access import public_status
 import service
 from system_status import tunnel_snapshot
-from power import read_power_state,read_guard
+from power import read_power_state,read_guard,should_keep_awake
 from computer_use import computer_use_snapshot, update_locked_use
 
 
@@ -80,7 +80,13 @@ def read_snapshot(root=ROOT):
     awake = guard["battery_covered"]
     power["idle_guard_active"]=awake
     awake_detail=("Idle sleep is blocked on battery and charger power." if awake else "Restart the guard to cover battery and charger power." if guard["running"] else "Starts with the background service.")
-    lid_enabled=power["closed_lid_enabled"]
+    sleep_allowed = not should_keep_awake(power)
+    if sleep_allowed:
+        awake_detail = "Normal idle sleep is allowed below 20% on battery, or when the power source cannot be read."
+    cutoff = power.get("low_battery_cutoff_percent") == 20
+    policy_ready = cutoff and power["closed_lid_enabled"] is should_keep_awake(power)
+    lid_detail = ("Managed cutoff is active. Normal sleep is allowed below 20% on battery; physical lid-close verification is still required." if policy_ready else
+                  "Battery cutoff is not verified. Apply Unattended settings to install or repair the managed power helper.")
     background_action = "restart" if loaded.returncode == 0 else "start"
     components = [
         component("background","Automatic recovery","ready" if running else "stopped","Starts at login and repairs stopped services." if running else "Start the system to enable recovery.","arrow.triangle.2.circlepath",background_action,"Restart" if running else "Start"),
@@ -88,8 +94,8 @@ def read_snapshot(root=ROOT):
         component("phone","Public phone access","ready" if phone_ready else "warning" if running else "stopped","Protected HTTPS is reachable; unpaired chats are blocked." if phone_ready else tunnel['detail'],"iphone.radiowaves.left.and.right","restart_tunnel","Reconnect tunnel"),
         component("desktop","ChatGPT app","ready" if desktop else "stopped","The desktop app is running." if desktop else "Open ChatGPT to process chat instructions.","bubble.left.and.bubble.right","open_desktop","Open app"),
         component("queue","Instruction delivery","ready" if queue_ready else "warning","Ready to queue follow-ups for existing chats." if queue_ready else "Start the desktop service and check ChatGPT.","text.bubble","open_dashboard","Open conversations"),
-        component("awake","Keep Mac awake","ready" if awake else "warning" if guard["running"] else "stopped",awake_detail,"battery.100","restart","Restart guard"),
-        component("lid","Closed-lid mode","ready" if lid_enabled is True else "warning","System sleep is disabled, including on battery. Physical lid-close verification is still required." if lid_enabled is True else "Enable this with your Mac administrator password in Unattended mode." if lid_enabled is False else "The system sleep setting could not be read.","laptopcomputer","open_power","Manage power"),
+        component("awake","Keep Mac awake","ready" if awake or (running and sleep_allowed) else "warning" if guard["running"] else "stopped",awake_detail,"battery.100","restart","Restart guard"),
+        component("lid","Closed-lid mode","ready" if policy_ready else "warning",lid_detail,"laptopcomputer","open_power","Manage power"),
         component('gateway','Protected phone gateway','ready' if gateway_ready else 'stopped','Authentication gateway is responding on this Mac.' if gateway_ready else 'The separate authentication gateway is not responding.','lock.shield','restart_web' if running else 'start','Restart service' if running else 'Start system'),
         component('tunnel','Cloudflare tunnel',tunnel['state'],tunnel['detail']+((' '+str(tunnel['connections'])+' edge connections.') if tunnel.get('connections') else ''),'network','restart_tunnel','Reconnect tunnel'),
         component('cloudflare','Cloudflare edge','ready' if not tunnel['stale'] and tunnel.get('public_http_status',0)>=100 else 'warning','Cloudflare is answering HTTPS. The connection back to this Mac is checked separately.' if not tunnel['stale'] and tunnel.get('public_http_status',0)>=100 else 'No fresh HTTPS response from Cloudflare. Check the Mac’s network connection.','cloud'),
