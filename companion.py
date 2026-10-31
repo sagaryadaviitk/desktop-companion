@@ -22,7 +22,7 @@ from socketserver import TCPServer
 from http.cookies import CookieError, SimpleCookie
 from urllib.parse import parse_qs, urlsplit
 
-from access import AccessStore, COOKIE_NAME, PairingError, RemoteSettings, SESSION_SECONDS
+from access import AccessStore, COOKIE_NAME, DAY_SECONDS, MAX_SESSION_DAYS, PairingError, RemoteSettings
 from power import cached_power_state
 from inbox import Inbox
 from runtime import AccountMonitor, SharedRuntime, RuntimeUnavailable
@@ -806,6 +806,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         if self.server.remote:
             self.send_header("Strict-Transport-Security", "max-age=86400")
+        if not any(key.lower() == 'set-cookie' for key, _ in extra_headers or []):
+            self.send_session_cookie()
         for key, value in extra_headers or []:
             self.send_header(key, value)
         self.end_headers()
@@ -837,6 +839,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Referrer-Policy', 'no-referrer')
                 self.send_header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; sandbox")
                 if self.server.remote: self.send_header('Strict-Transport-Security', 'max-age=86400')
+                self.send_session_cookie()
                 if role == 'download':
                     self.send_header('Content-Disposition', f'attachment; filename="{identifier}{Path(asset["name"]).suffix}"')
                 for name, value in headers: self.send_header(name, value)
@@ -880,14 +883,29 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get("Sec-Fetch-Site", "none") in ("same-origin", "none")
 
     def session(self):
+        self._browser_cookie = None
         if not self.server.remote:
             return None
         try:
             cookie = SimpleCookie(self.headers.get("Cookie", ""))
             token = cookie[COOKIE_NAME].value if COOKIE_NAME in cookie else None
-            return self.server.access.authenticate(token)
+            session = self.server.access.authenticate(token)
+            if session:
+                self._browser_cookie = (token, session['expires'])
+            return session
         except (CookieError, ValueError):
             return None
+
+    def browser_cookie(self, token, expires):
+        now = self.server.access.clock()
+        # Browsers limit persistent-cookie retention. Keep a never-expiring
+        # token's cookie for a year, renewing it on authenticated requests.
+        deadline = expires or now + MAX_SESSION_DAYS * DAY_SECONDS
+        return f"{COOKIE_NAME}={token}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age={max(0, int(deadline-now))}; Expires={formatdate(deadline, usegmt=True)}"
+
+    def send_session_cookie(self):
+        if self.server.remote and getattr(self, '_browser_cookie', None):
+            self.send_header('Set-Cookie', self.browser_cookie(*self._browser_cookie))
 
     def read_payload(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -899,6 +917,7 @@ class Handler(BaseHTTPRequestHandler):
         return value
 
     def do_GET(self):
+        self._browser_cookie = None
         if self.path == "/healthz" and self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}":
             return self.reply(200, {"ok": True, "authentication_required": self.server.remote, "gateway_version": 1})
         if not self.valid_origin():
@@ -1034,6 +1053,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(503, {"error": "Local history is unavailable or its schema has changed. No data was modified."})
 
     def do_POST(self):
+        self._browser_cookie = None
         if not self.valid_origin():
             return self.reply(403, {"error": "This origin is not enabled."})
         self._invalidate_reads=False
@@ -1041,10 +1061,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/auth/login" and self.server.remote:
                 payload = self.read_payload()
                 try:
-                    token, _ = self.server.access.exchange(payload.get("code"), payload.get("name"))
+                    token, session = self.server.access.exchange(payload.get("code"), payload.get("name"))
                 except PairingError as error:
                     return self.reply(429 if error.limited else 401, {"error": str(error)}, extra_headers=[("Retry-After", "300")] if error.limited else [])
-                cookie = f"{COOKIE_NAME}={token}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_SECONDS}"
+                cookie = self.browser_cookie(token, session['expires'])
                 return self.reply(200, {"authenticated": True}, extra_headers=[("Set-Cookie", cookie)])
             session = self.session()
             if self.server.remote and not session:

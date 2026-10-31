@@ -1,5 +1,15 @@
 import Foundation
 
+struct BrowserAccessPolicy: Decodable, Equatable {
+    let default_days, max_days: Int
+
+    func duration(days: String, never: Bool) -> Int? {
+        if never { return 0 }
+        guard max_days >= 1, let value = Int(days), (1...max_days).contains(value) else { return nil }
+        return value
+    }
+}
+
 struct UnattendedSettings: Equatable {
     static let timeouts = [1, 2, 5, 10, 15, 30, 60]
     static let defaultBattery = 5

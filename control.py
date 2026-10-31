@@ -99,21 +99,21 @@ def read_snapshot(root=ROOT):
     access_error = None
     try:
         store = AccessStore(root/".state"/"access.sqlite")
-        devices,history = store.devices(include_history=True),store.pairing_history()
+        devices,history,policy = store.devices(include_history=True),store.pairing_history(),store.policy()
     except (sqlite3.Error,OSError):
-        devices,history = [],[]
+        devices,history,policy = [],[],None
         access_error = "Access records could not be read. Restart the system and try again."
     components.append(component('access','Pairing & browser access','warning' if access_error else 'ready',access_error or 'Private pairing and browser-access records are available.','key','open_phone','Manage access'))
     required={'background','server','phone','desktop','queue','awake','gateway','tunnel','network','history','access'}
     issues=[item for item in components if item['id'] in required and item['state'] not in ('ready','disabled')]
     summary={'state':'ready' if not issues else 'warning','title':'All components are ready' if not issues else str(len(issues))+' components need attention','detail':'Phone access is protected and the Mac is ready.' if not issues else 'Local and phone connectivity are checked independently. Open a component for recovery.'}
-    return {"components":components,"devices":devices,"pairing_history":history,"access_error":access_error,
+    return {"components":components,"devices":devices,"pairing_history":history,"access_error":access_error,"access_policy":policy,
             'summary':summary,'tunnel':tunnel,
             "phone_url":origin or ('https://'+service.HOSTNAME if service.HOSTNAME else ''),"dashboard_url":"http://127.0.0.1:8765",
             "can_pair":phone_ready and server_ready and not access_error,"running":running,"plugged_in":plugged_in,"power":power,"computer_use":computer_use_snapshot(root/'.state'/'computer-use-check.json'),"checked_at":time.time()}
 
 
-def perform(action,identifier=None,root=ROOT):
+def perform(action,identifier=None,root=ROOT,days=None):
     if action == "status":
         return {"ok":True,"snapshot":read_snapshot(root)}
     if action == 'update_locked_use':
@@ -143,6 +143,9 @@ def perform(action,identifier=None,root=ROOT):
             service.launchctl("bootout",service.TARGET)
         return {"ok":True,"message":"System stopped. It will start again at your next login."}
     store = AccessStore(root/".state"/"access.sqlite")
+    if action == "set_session_default":
+        store.set_default_days(days)
+        return {"ok":True,"message":"Default browser duration saved. Existing browser expiry dates are unchanged."}
     if action == "pair":
         server = local_json("/api/remote/status")
         origin = RemoteSettings(root/".state"/"remote.json").origin()
@@ -151,6 +154,9 @@ def perform(action,identifier=None,root=ROOT):
         return {"ok":True,"pairing":store.create_pairing(),"message":"Enter this code on your phone. It works once and expires in five minutes."}
     if not identifier or not re.fullmatch(r"[a-f0-9]{24}",identifier):
         raise ValueError("Select a valid access record.")
+    if action == "set_session_expiry":
+        store.set_device_expiry(identifier,days)
+        return {"ok":True,"message":"Browser expiry updated. Refresh that browser before its previous expiry to receive an extension."}
     if action == "revoke":
         store.revoke(identifier)
         return {"ok":True,"message":"Browser access revoked. Pair again to reconnect it."}
@@ -162,15 +168,18 @@ def perform(action,identifier=None,root=ROOT):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action",choices=["status","start","restart","restart_web","restart_tunnel","stop","pair","revoke","cancel_code","update_locked_use"])
+    parser.add_argument("action",choices=["status","start","restart","restart_web","restart_tunnel","stop","pair","revoke","cancel_code","update_locked_use","set_session_default","set_session_expiry"])
     parser.add_argument("--id")
+    parser.add_argument("--days",type=int,help="Browser duration in days; 0 means Never expires.")
     args = parser.parse_args()
     try:
-        value = perform(args.action,args.id)
+        value = perform(args.action,args.id,days=args.days)
+    except ValueError as error:
+        value = {"ok":False,"message":str(error) if args.action in ('set_session_default','set_session_expiry') else "The action could not complete. Check the component status and try again."}
     except RuntimeError as error:
         # This action raises only our fixed, user-facing installer diagnostics.
         value = {"ok":False,"message":str(error) if args.action == 'update_locked_use' else "The action could not complete. Check the component status and try again."}
-    except (OSError,sqlite3.Error,ValueError,subprocess.SubprocessError):
+    except (OSError,sqlite3.Error,subprocess.SubprocessError):
         value = {"ok":False,"message":"The action could not complete. Check the component status and try again."}
     print(json.dumps(value))
 

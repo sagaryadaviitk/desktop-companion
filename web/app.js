@@ -775,7 +775,7 @@ async function showDevices(){
   if(!result.devices.length){const text=document.createElement("p");text.textContent="No browsers are currently paired.";el("devices").append(text);}
   for(const device of result.devices){
     const row=document.createElement("div");row.className="device-row";
-    const label=document.createElement("span");label.textContent=`${device.name} · Expires ${shortTime(device.expires*1000)}`;
+    const label=document.createElement("span");label.textContent=`${device.name} · ${device.expires === 0 ? "Never expires" : `Expires ${shortTime(device.expires*1000)}`}`;
     const revoke=document.createElement("button");revoke.className="quiet-button";revoke.textContent="Revoke";
     revoke.addEventListener("click",async()=>{try{await api("/api/devices/revoke",{method:"POST",headers:{"Content-Type":"application/json","X-Companion-CSRF":csrf},body:JSON.stringify({device_id:device.id})});await showDevices();}catch(error){el("device-error").textContent=error.message;}});
     row.append(label,revoke);el("devices").append(row);

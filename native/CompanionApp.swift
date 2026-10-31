@@ -9,6 +9,8 @@ private let desktopAppPath = Bundle.main.object(forInfoDictionaryKey: "Companion
 private let cliDirectory = Bundle.main.object(forInfoDictionaryKey: "CompanionCLIPath") as? String ?? ""
 
 private let canvas = CompanionTheme.canvas
+// Select the property wrapper on SDKs that also export a State macro.
+private typealias ViewState<Value> = SwiftUI.State<Value>
 
 struct Component: Decodable, Identifiable {
     let id, title, state, detail, icon: String
@@ -50,6 +52,7 @@ struct Snapshot: Decodable {
     let can_pair, running, plugged_in: Bool
     let checked_at: Double
     let access_error: String?
+    let access_policy: BrowserAccessPolicy?
     let power: PowerSnapshot?
     let computer_use: ComputerUseSnapshot?
     let summary: SystemSummary?
@@ -105,8 +108,8 @@ final class ControlModel: ObservableObject {
         activation = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification).sink { [weak self] _ in self?.refresh() }
     }
 
-    private func request(_ action: String, id: String? = nil, completion: @escaping (Reply?) -> Void) {
-        guard action == "status" else { requestFromProcess(action, id: id, completion: completion); return }
+    private func request(_ action: String, id: String? = nil, days: Int? = nil, completion: @escaping (Reply?) -> Void) {
+        guard action == "status" else { requestFromProcess(action, id: id, days: days, completion: completion); return }
         // Only observational status uses HTTP. Actions keep the existing native
         // process path and are never retried after a lost acknowledgement.
         let url = URL(string: "http://127.0.0.1:8765/api/control/status")!
@@ -122,13 +125,13 @@ final class ControlModel: ObservableObject {
         }.resume()
     }
 
-    private func requestFromProcess(_ action: String, id: String? = nil, completion: @escaping (Reply?) -> Void) {
+    private func requestFromProcess(_ action: String, id: String? = nil, days: Int? = nil, completion: @escaping (Reply?) -> Void) {
         let root = Bundle.main.object(forInfoDictionaryKey: "CompanionRoot") as? String ?? ""
         let python = Bundle.main.object(forInfoDictionaryKey: "CompanionPython") as? String ?? ""
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: python)
-            process.arguments = [root + "/control.py", action] + (id.map { ["--id", $0] } ?? [])
+            process.arguments = [root + "/control.py", action] + (id.map { ["--id", $0] } ?? []) + (days.map { ["--days", String($0)] } ?? [])
             process.currentDirectoryURL = URL(fileURLWithPath: root)
             process.environment = ["HOME": NSHomeDirectory(), "PATH": cliDirectory + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"]
             let output = Pipe()
@@ -194,7 +197,7 @@ final class ControlModel: ObservableObject {
         }
     }
 
-    func perform(_ action: String, id: String? = nil) {
+    func perform(_ action: String, id: String? = nil, days: Int? = nil) {
         guard !busy else { return }
         actionGeneration += 1
         busy = true
@@ -202,7 +205,7 @@ final class ControlModel: ObservableObject {
         notice = action == "pair" ? "Creating a one-use code…" : action == "update_locked_use" ? "Complete the OpenAI installer’s macOS authentication prompt. This app never reads or stores your password." : "Working on it…"
         if action == "restart" || action == "stop" { code = nil }
         waitingForRecovery = action == "restart" || action == "start"
-        request(action, id: id) { [weak self] reply in
+        request(action, id: id, days: days) { [weak self] reply in
             guard let self = self else { return }
             self.busy = false
             if let reply = reply, reply.ok {
@@ -757,6 +760,9 @@ struct ControlView: View {
                     if model.snapshot?.can_pair != true { Text("Wait for Phone connection to be ready.").font(.system(size: 11)).foregroundStyle(.secondary) }
                 }
             }.padding(24).companionCard()
+            if let policy = model.snapshot?.access_policy {
+                BrowserDurationSettings(model: model, policy: policy)
+            }
             accessList
             codeHistory
         }
@@ -774,12 +780,17 @@ struct ControlView: View {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(device.name).font(.system(size: 13, weight: .semibold))
                                 Text("Paired " + shortDate(device.created)).font(.system(size: 11)).foregroundStyle(.secondary)
-                                Text(device.status == "revoked" ? "Revoked " + shortDate(device.revoked_at ?? device.created) : (device.status == "expired" ? "Expired " : "Expires ") + shortDate(device.expires)).font(.system(size: 11)).foregroundStyle(.secondary)
+                                Text(device.status == "revoked" ? "Revoked " + shortDate(device.revoked_at ?? device.created) : device.expires == 0 ? "Never expires" : (device.status == "expired" ? "Expired " : "Expires ") + shortDate(device.expires)).font(.system(size: 11)).foregroundStyle(.secondary)
                                 if let last = device.last_seen { Text("Last used " + shortDate(last)).font(.system(size: 11)).foregroundStyle(.secondary) }
                             }
                             Spacer()
                             StatusPill(state: device.status)
-                            if device.status == "active" { Button("Revoke access") { model.perform("revoke", id: device.id) }.font(.system(size: 11)).disabled(model.busy) }
+                            if device.status == "active" {
+                                VStack(alignment: .trailing, spacing: 8) {
+                                    if let policy = model.snapshot?.access_policy { BrowserExpiryButton(model: model, device: device, policy: policy) }
+                                    Button("Revoke access") { model.perform("revoke", id: device.id) }.font(.system(size: 11)).disabled(model.busy)
+                                }
+                            }
                         }.padding(17)
                         if device.id != devices.last?.id { Divider().padding(.horizontal, 17) }
                     }
@@ -808,6 +819,76 @@ struct ControlView: View {
                     }
                 }.companionCard()
             } else { Text("New pairing codes will appear here.").font(.system(size: 12)).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity, alignment: .leading).companionCard() }
+        }
+    }
+}
+
+private struct BrowserDurationInput: View {
+    let policy: BrowserAccessPolicy
+    @Binding var days: String
+    @Binding var never: Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Duration")
+                TextField("Days", text: $days).frame(width: 64).textFieldStyle(.roundedBorder).disabled(never)
+                Text("days (1–\(policy.max_days))").foregroundStyle(.secondary)
+            }
+            Toggle("Never expires", isOn: $never)
+            Text("Never expires keeps access until you revoke it. Browsers can still clear cookies or limit their retention.").font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct BrowserDurationSettings: View {
+    @ObservedObject var model: ControlModel
+    let policy: BrowserAccessPolicy
+    @ViewState private var days = "7"
+    @ViewState private var never = false
+    private var value: Int? { policy.duration(days: days, never: never) }
+    private func load() { days = String(policy.default_days == 0 ? 7 : policy.default_days); never = policy.default_days == 0 }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Default browser duration").font(.system(size: 17, weight: .semibold))
+            Text("Applies when a browser pairs with this Mac. Existing browser expiry dates stay unchanged.").font(.system(size: 12)).foregroundStyle(.secondary)
+            BrowserDurationInput(policy: policy, days: $days, never: $never)
+            Button("Save default") { if let value = value { model.perform("set_session_default", days: value) } }
+                .disabled(model.busy || value == nil || value == policy.default_days)
+        }.padding(24).companionCard().onAppear(perform: load).onChange(of: policy.default_days) { _ in load() }
+    }
+}
+
+private struct BrowserExpiryButton: View {
+    @ObservedObject var model: ControlModel
+    let device: Device
+    let policy: BrowserAccessPolicy
+    @ViewState private var editing = false
+    @ViewState private var days = "7"
+    @ViewState private var never = false
+    var body: some View {
+        Button("Change expiry…") {
+            days = String(policy.default_days == 0 ? 7 : policy.default_days)
+            never = device.expires == 0
+            editing = true
+        }.font(.system(size: 11)).disabled(model.busy)
+        .sheet(isPresented: $editing) {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Change browser expiry").font(.title2)
+                Text(device.name).font(.headline)
+                Text("A duration sets the expiry from now. Never expires removes the scheduled expiry.").font(.system(size: 12)).foregroundStyle(.secondary)
+                BrowserDurationInput(policy: policy, days: $days, never: $never)
+                Text("Refresh that browser before its previous expiry to receive an extension. Expired or revoked browsers must pair again.").font(.system(size: 12)).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { editing = false }.keyboardShortcut(.cancelAction)
+                    Button("Apply expiry") {
+                        if let value = policy.duration(days: days, never: never) {
+                            model.perform("set_session_expiry", id: device.id, days: value)
+                            editing = false
+                        }
+                    }.keyboardShortcut(.defaultAction).disabled(model.busy || policy.duration(days: days, never: never) == nil)
+                }
+            }.padding(28).frame(width: 440)
         }
     }
 }

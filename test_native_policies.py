@@ -8,6 +8,22 @@ import unittest
 
 @unittest.skipUnless(sys.platform=='darwin' and shutil.which('xcrun'),'macOS Swift tools are required')
 class NativePoliciesTests(unittest.TestCase):
+    def test_browser_duration_validates_custom_days_and_explicit_never(self):
+        source=Path(__file__).parent/'native'/'ControlPolicies.swift'
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);main=root/'main.swift';binary=root/'duration'
+            main.write_text('''import Foundation
+let policy = try! JSONDecoder().decode(BrowserAccessPolicy.self, from: Data("{\\"default_days\\":7,\\"max_days\\":365}".utf8))
+assert(policy.default_days == 7)
+for days in ["1", "7", "30", "365"] { assert(policy.duration(days:days, never:false) == Int(days)) }
+for days in ["", "0", "-1", "366", "1.5", "abc", "999999999999999999999999999"] { assert(policy.duration(days:days, never:false) == nil) }
+assert(policy.duration(days:"invalid", never:true) == 0)
+print("Duration checks passed")
+''')
+            subprocess.run(['xcrun','swiftc',str(source),str(main),'-o',str(binary)],check=True,capture_output=True,timeout=60)
+            result=subprocess.run([str(binary)],check=True,capture_output=True,text=True,timeout=10)
+            self.assertIn('Duration checks passed',result.stdout)
+
     def test_embedded_local_chat_origin_and_deep_link_policy(self):
         source=Path(__file__).parent/'native'/'ControlPolicies.swift'
         with tempfile.TemporaryDirectory() as temp:

@@ -17,6 +17,15 @@ from urllib.parse import urlsplit
 
 COOKIE_NAME = "__Host-companion"
 SESSION_SECONDS = 7 * 24 * 60 * 60
+DAY_SECONDS = 24 * 60 * 60
+MAX_SESSION_DAYS = 365
+
+
+def session_days(value):
+    # Zero explicitly means no scheduled expiry, never an immediate expiry.
+    if type(value) is not int or not 0 <= value <= MAX_SESSION_DAYS:
+        raise ValueError("Choose 1–365 days or Never expires.")
+    return value
 
 
 class PairingError(Exception):
@@ -43,7 +52,30 @@ class AccessStore:
             if "event_id" not in {row[1] for row in connection.execute("PRAGMA table_info(pairing)")}:
                 connection.execute("ALTER TABLE pairing ADD COLUMN event_id TEXT")
             connection.execute("CREATE TABLE IF NOT EXISTS pairing_events (id TEXT PRIMARY KEY, created REAL NOT NULL, expires REAL NOT NULL, status TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS access_settings (id INTEGER PRIMARY KEY CHECK(id=1), session_days INTEGER NOT NULL)")
+            connection.execute("INSERT OR IGNORE INTO access_settings VALUES (1,?)", (SESSION_SECONDS // DAY_SECONDS,))
         self.path.chmod(0o600)
+
+    def policy(self):
+        with self.db() as connection:
+            days = connection.execute("SELECT session_days FROM access_settings WHERE id=1").fetchone()[0]
+        return {"default_days": session_days(days), "max_days": MAX_SESSION_DAYS}
+
+    def set_default_days(self, days):
+        days = session_days(days)
+        with self.db() as connection:
+            connection.execute("UPDATE access_settings SET session_days=? WHERE id=1", (days,))
+
+    def set_device_expiry(self, device_id, days):
+        days = session_days(days)
+        with self.db() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            now = self.clock()
+            expires = now + days * DAY_SECONDS if days else 0
+            updated = connection.execute("UPDATE sessions SET expires=? WHERE id=? AND (expires=0 OR expires>?) AND revoked_at IS NULL", (expires,device_id,now))
+            if updated.rowcount != 1:
+                raise ValueError("This browser is no longer active. Pair it again to reconnect.")
+        return expires
 
     @contextmanager
     def db(self):
@@ -93,7 +125,8 @@ class AccessStore:
             connection.execute("DELETE FROM pairing WHERE code_hash=?", (self.digest(normalized),))
             connection.execute("UPDATE pairing_events SET status='used' WHERE id=?",(row["event_id"],))
             token = secrets.token_urlsafe(32)
-            session = {"id": secrets.token_hex(12), "csrf": secrets.token_urlsafe(32), "expires": now + SESSION_SECONDS}
+            days = session_days(connection.execute("SELECT session_days FROM access_settings WHERE id=1").fetchone()[0])
+            session = {"id": secrets.token_hex(12), "csrf": secrets.token_urlsafe(32), "expires": now + days * DAY_SECONDS if days else 0}
             clean_name = re.sub(r"[\x00-\x1f\x7f]", "", str(name or "Phone browser"))[:80]
             connection.execute("INSERT INTO sessions (id,token_hash,csrf,name,created,expires,last_seen,revoked_at) VALUES (?,?,?,?,?,?,?,?)", (session["id"],self.digest(token),session["csrf"],clean_name,now,session["expires"],now,None))
         return token, session
@@ -103,7 +136,7 @@ class AccessStore:
             return None
         with self.db() as connection:
             now = self.clock()
-            row = connection.execute("SELECT id,csrf,name,expires,last_seen FROM sessions WHERE token_hash=? AND expires>? AND revoked_at IS NULL", (self.digest(token),now)).fetchone()
+            row = connection.execute("SELECT id,csrf,name,expires,last_seen FROM sessions WHERE token_hash=? AND (expires=0 OR expires>?) AND revoked_at IS NULL", (self.digest(token),now)).fetchone()
             if row and (row["last_seen"] is None or row["last_seen"] < now-60):
                 connection.execute("UPDATE sessions SET last_seen=? WHERE id=?",(now,row["id"]))
         return dict(row) if row else None
@@ -111,11 +144,11 @@ class AccessStore:
     def devices(self, include_history=False):
         with self.db() as connection:
             query = "SELECT id,name,created,expires,last_seen,revoked_at FROM sessions"
-            rows = connection.execute(query + (" ORDER BY created DESC LIMIT 100" if include_history else " WHERE expires>? AND revoked_at IS NULL ORDER BY created DESC"),() if include_history else (self.clock(),)).fetchall()
+            rows = connection.execute(query + (" ORDER BY created DESC LIMIT 100" if include_history else " WHERE (expires=0 OR expires>?) AND revoked_at IS NULL ORDER BY created DESC"),() if include_history else (self.clock(),)).fetchall()
         values = []
         for row in rows:
             value = dict(row)
-            value["status"] = "revoked" if row["revoked_at"] is not None else "expired" if row["expires"] <= self.clock() else "active"
+            value["status"] = "revoked" if row["revoked_at"] is not None else "expired" if row["expires"] != 0 and row["expires"] <= self.clock() else "active"
             values.append(value)
         return values
 
