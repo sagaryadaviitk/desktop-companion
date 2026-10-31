@@ -846,7 +846,7 @@ private struct BrowserDurationSettings: View {
     @ViewState private var days = "7"
     @ViewState private var never = false
     private var value: Int? { policy.duration(days: days, never: never) }
-    private func load() { days = String(policy.default_days == 0 ? 7 : policy.default_days); never = policy.default_days == 0 }
+    private func load(_ value: Int) { days = String(value == 0 ? 7 : value); never = value == 0 }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Default browser duration").font(.system(size: 17, weight: .semibold))
@@ -854,7 +854,7 @@ private struct BrowserDurationSettings: View {
             BrowserDurationInput(policy: policy, days: $days, never: $never)
             Button("Save default") { if let value = value { model.perform("set_session_default", days: value) } }
                 .disabled(model.busy || value == nil || value == policy.default_days)
-        }.padding(24).companionCard().onAppear(perform: load).onChange(of: policy.default_days) { _ in load() }
+        }.padding(24).companionCard().onAppear { load(policy.default_days) }.onChange(of: policy.default_days) { value in load(value) }
     }
 }
 
