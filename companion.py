@@ -5,6 +5,7 @@ import argparse
 from contextlib import closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -17,15 +18,16 @@ import threading
 import time
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from http.cookies import CookieError, SimpleCookie
 from urllib.parse import parse_qs, urlsplit
 
-from access import AccessStore, COOKIE_NAME, PairingError, RemoteSettings, SESSION_SECONDS
+from access import AccessStore, COOKIE_NAME, DAY_SECONDS, MAX_SESSION_DAYS, PairingError, RemoteSettings
 from power import cached_power_state
 from inbox import Inbox
 from runtime import AccountMonitor, SharedRuntime, RuntimeUnavailable
 from questions import pending_questions, answer_envelope, answer_identity, queued_question_answers, replies as question_replies
-from desktop_runtime import DesktopRuntime,queue_photo_message,QueueNotClaimed,change_queued_message
+from desktop_runtime import DesktopRuntime,queue_photo_message,photo_queue_supported,QueueNotClaimed,change_queued_message
 from approvals import ApprovalChanged, digest as approval_digest
 from computer_use import computer_use_snapshot
 from read_cache import ReadCache
@@ -586,12 +588,11 @@ class Bridge:
         self.executable = shutil.which("codex")
         self.runner = runner
         self.queue_supported = False
-        self.photos_supported = False
+        self.photos_supported = None
         if self.executable:
             try:
                 result = runner([self.executable, "queue", "--help"], capture_output=True, text=True, timeout=3)
                 self.queue_supported = result.returncode == 0 and "--thread" in result.stdout and "--message" in result.stdout
-                self.photos_supported = self.queue_supported and '--image' in result.stdout
             except (OSError, subprocess.TimeoutExpired):
                 pass
 
@@ -611,8 +612,10 @@ class Bridge:
         availability = self.availability()
         if not availability["available"]:
             raise ControlError(availability["reason"])
-        if photos and not self.photos_supported:raise ControlError('This desktop CLI does not support photo attachments.')
         if photos:
+            if not self.photos_supported:
+                self.photos_supported = photo_queue_supported(self.executable,self.runner)
+            if not self.photos_supported:raise ControlError('The installed app-server does not advertise photo queue support. Text queueing remains available.')
             try:return queue_photo_message(thread_id,message,photos,self.executable)
             except RuntimeUnavailable as error:raise ControlError(str(error),uncertain=True) from error
         command=[self.executable,"queue","--thread",thread_id,"--message",message]
@@ -632,13 +635,20 @@ class Bridge:
 
 
 class CommandJournal:
-    def __init__(self, path):
+    def __init__(self, path, clock=time.monotonic):
         self.path = Path(path)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.lock = threading.Lock()
+        self.clock = clock
+        self.active_since = None
         with closing(sqlite3.connect(self.path)) as connection, connection:
             connection.execute("CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)")
         self.path.chmod(0o600)
+
+    def healthy(self):
+        # Do not acquire the command lock: that is precisely what may be stuck.
+        active = self.active_since
+        return active is None or 0 <= self.clock() - active < 120
 
     def lookup(self, identity, payload=None):
         with self.lock, closing(sqlite3.connect(self.path)) as connection:
@@ -668,19 +678,35 @@ class CommandJournal:
             pending = {"state": "unknown", "message": "Delivery is unconfirmed. Check the desktop before resending."}
             connection.execute("INSERT OR REPLACE INTO commands VALUES (?,?,?)", (command_id, fingerprint, json.dumps(pending)))
             connection.commit()
+            self.active_since = self.clock()
             try:
-                result = action()
-            except ControlError as error:
-                result = {"state": "unknown" if error.uncertain else "rejected", "message": str(error)}
-                if error.retryable and not error.uncertain:result['retryable']=True
-            connection.execute("UPDATE commands SET result=? WHERE id=?", (json.dumps(result), command_id))
-            connection.commit()
-            return result
+                try:
+                    result = action()
+                except ControlError as error:
+                    result = {"state": "unknown" if error.uncertain else "rejected", "message": str(error)}
+                    if error.retryable and not error.uncertain:result['retryable']=True
+                connection.execute("UPDATE commands SET result=? WHERE id=?", (json.dumps(result), command_id))
+                connection.commit()
+                return result
+            finally:
+                self.active_since = None
 
 
 class CompanionServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 32
+
+    def server_bind(self):
+        # A numeric loopback address needs no name lookup. HTTPServer's default
+        # getfqdn call can otherwise stall startup on a managed DNS resolver.
+        try:
+            loopback = ipaddress.ip_address(self.server_address[0]).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            return super().server_bind()
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None,read_cache=None,local_assistant=None,local_error=None):
         if remote and (access is None or settings is None):
@@ -792,6 +818,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         if self.server.remote:
             self.send_header("Strict-Transport-Security", "max-age=86400")
+        if not any(key.lower() == 'set-cookie' for key, _ in extra_headers or []):
+            self.send_session_cookie()
         for key, value in extra_headers or []:
             self.send_header(key, value)
         self.end_headers()
@@ -823,6 +851,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Referrer-Policy', 'no-referrer')
                 self.send_header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; sandbox")
                 if self.server.remote: self.send_header('Strict-Transport-Security', 'max-age=86400')
+                self.send_session_cookie()
                 if role == 'download':
                     self.send_header('Content-Disposition', f'attachment; filename="{identifier}{Path(asset["name"]).suffix}"')
                 for name, value in headers: self.send_header(name, value)
@@ -866,14 +895,29 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get("Sec-Fetch-Site", "none") in ("same-origin", "none")
 
     def session(self):
+        self._browser_cookie = None
         if not self.server.remote:
             return None
         try:
             cookie = SimpleCookie(self.headers.get("Cookie", ""))
             token = cookie[COOKIE_NAME].value if COOKIE_NAME in cookie else None
-            return self.server.access.authenticate(token)
+            session = self.server.access.authenticate(token)
+            if session:
+                self._browser_cookie = (token, session['expires'])
+            return session
         except (CookieError, ValueError):
             return None
+
+    def browser_cookie(self, token, expires):
+        now = self.server.access.clock()
+        # Browsers limit persistent-cookie retention. Keep a never-expiring
+        # token's cookie for a year, renewing it on authenticated requests.
+        deadline = expires or now + MAX_SESSION_DAYS * DAY_SECONDS
+        return f"{COOKIE_NAME}={token}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age={max(0, int(deadline-now))}; Expires={formatdate(deadline, usegmt=True)}"
+
+    def send_session_cookie(self):
+        if self.server.remote and getattr(self, '_browser_cookie', None):
+            self.send_header('Set-Cookie', self.browser_cookie(*self._browser_cookie))
 
     def read_payload(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -885,8 +929,10 @@ class Handler(BaseHTTPRequestHandler):
         return value
 
     def do_GET(self):
+        self._browser_cookie = None
         if self.path == "/healthz" and self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}":
-            return self.reply(200, {"ok": True, "authentication_required": self.server.remote, "gateway_version": 1})
+            healthy = self.server.journal.healthy()
+            return self.reply(200 if healthy else 503, {"ok": healthy, "authentication_required": self.server.remote, "gateway_version": 1, "server_pid": os.getpid()})
         if not self.valid_origin():
             return self.reply(403, {"error": "This origin is not enabled."})
         parsed = urlsplit(self.path)
@@ -1020,6 +1066,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(503, {"error": "Local history is unavailable or its schema has changed. No data was modified."})
 
     def do_POST(self):
+        self._browser_cookie = None
         if not self.valid_origin():
             return self.reply(403, {"error": "This origin is not enabled."})
         self._invalidate_reads=False
@@ -1027,10 +1074,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/auth/login" and self.server.remote:
                 payload = self.read_payload()
                 try:
-                    token, _ = self.server.access.exchange(payload.get("code"), payload.get("name"))
+                    token, session = self.server.access.exchange(payload.get("code"), payload.get("name"))
                 except PairingError as error:
                     return self.reply(429 if error.limited else 401, {"error": str(error)}, extra_headers=[("Retry-After", "300")] if error.limited else [])
-                cookie = f"{COOKIE_NAME}={token}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_SECONDS}"
+                cookie = self.browser_cookie(token, session['expires'])
                 return self.reply(200, {"authenticated": True}, extra_headers=[("Set-Cookie", cookie)])
             session = self.session()
             if self.server.remote and not session:

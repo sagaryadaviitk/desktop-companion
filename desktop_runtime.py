@@ -17,11 +17,37 @@ import struct
 import shutil
 import re
 import time
+import tempfile
+import subprocess
 import uuid
 
 from runtime import RuntimeUnavailable, SharedRuntime, RpcClient
 from approvals import approval_views, pending_requests, response_for, ApprovalChanged
 from questions import live_question_ids
+
+
+def photo_queue_supported(executable, runner=None):
+    """Inspect the installed RPC schema without opening a chat or queueing input."""
+    runner = runner or subprocess.run
+    try:
+        with tempfile.TemporaryDirectory(prefix='companion-schema-') as directory:
+            result = runner([executable, 'app-server', 'generate-json-schema', '--experimental', '--out', directory],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            if result.returncode != 0:return False
+            root = Path(directory)
+            paths = [root/'ClientRequest.json', root/'v2/ThreadQueueAddParams.json']
+            if any(path.is_symlink() or not path.is_file() or path.stat().st_size > 8*1024*1024 for path in paths):return False
+            methods, params = (json.loads(path.read_text()) for path in paths)
+            exposed = any(entry.get('properties',{}).get('method',{}).get('enum') == ['thread/queue/add']
+                          for entry in methods.get('oneOf',[]))
+            reference = params['properties']['input']['items']['$ref']
+            if reference != '#/definitions/UserInput':return False
+            choices = params['definitions']['UserInput'].get('oneOf',[])
+            images = any(entry.get('properties',{}).get('type',{}).get('enum') == ['localImage']
+                         and 'path' in entry.get('required',[]) for entry in choices)
+            return exposed and images
+    except (OSError,ValueError,KeyError,TypeError,AttributeError,subprocess.SubprocessError):
+        return False
 
 
 def queue_input_matches(inputs,message,photos):

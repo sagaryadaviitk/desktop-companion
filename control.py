@@ -15,7 +15,7 @@ from access import AccessStore, RemoteSettings
 from remote_access import public_status
 import service
 from system_status import tunnel_snapshot
-from power import read_power_state,read_guard
+from power import read_power_state,read_guard,should_keep_awake
 from computer_use import computer_use_snapshot, update_locked_use
 
 
@@ -80,7 +80,13 @@ def read_snapshot(root=ROOT):
     awake = guard["battery_covered"]
     power["idle_guard_active"]=awake
     awake_detail=("Idle sleep is blocked on battery and charger power." if awake else "Restart the guard to cover battery and charger power." if guard["running"] else "Starts with the background service.")
-    lid_enabled=power["closed_lid_enabled"]
+    sleep_allowed = not should_keep_awake(power)
+    if sleep_allowed:
+        awake_detail = "Normal idle sleep is allowed below 20% on battery, or when the power source cannot be read."
+    cutoff = power.get("low_battery_cutoff_percent") == 20
+    policy_ready = cutoff and power["closed_lid_enabled"] is should_keep_awake(power)
+    lid_detail = ("Managed cutoff is active. Normal sleep is allowed below 20% on battery; physical lid-close verification is still required." if policy_ready else
+                  "Battery cutoff is not verified. Apply Unattended settings to install or repair the managed power helper.")
     background_action = "restart" if loaded.returncode == 0 else "start"
     components = [
         component("background","Automatic recovery","ready" if running else "stopped","Starts at login and repairs stopped services." if running else "Start the system to enable recovery.","arrow.triangle.2.circlepath",background_action,"Restart" if running else "Start"),
@@ -88,8 +94,8 @@ def read_snapshot(root=ROOT):
         component("phone","Public phone access","ready" if phone_ready else "warning" if running else "stopped","Protected HTTPS is reachable; unpaired chats are blocked." if phone_ready else tunnel['detail'],"iphone.radiowaves.left.and.right","restart_tunnel","Reconnect tunnel"),
         component("desktop","ChatGPT app","ready" if desktop else "stopped","The desktop app is running." if desktop else "Open ChatGPT to process chat instructions.","bubble.left.and.bubble.right","open_desktop","Open app"),
         component("queue","Instruction delivery","ready" if queue_ready else "warning","Ready to queue follow-ups for existing chats." if queue_ready else "Start the desktop service and check ChatGPT.","text.bubble","open_dashboard","Open conversations"),
-        component("awake","Keep Mac awake","ready" if awake else "warning" if guard["running"] else "stopped",awake_detail,"battery.100","restart","Restart guard"),
-        component("lid","Closed-lid mode","ready" if lid_enabled is True else "warning","System sleep is disabled, including on battery. Physical lid-close verification is still required." if lid_enabled is True else "Enable this with your Mac administrator password in Unattended mode." if lid_enabled is False else "The system sleep setting could not be read.","laptopcomputer","open_power","Manage power"),
+        component("awake","Keep Mac awake","ready" if awake or (running and sleep_allowed) else "warning" if guard["running"] else "stopped",awake_detail,"battery.100","restart","Restart guard"),
+        component("lid","Closed-lid mode","ready" if policy_ready else "warning",lid_detail,"laptopcomputer","open_power","Manage power"),
         component('gateway','Protected phone gateway','ready' if gateway_ready else 'stopped','Authentication gateway is responding on this Mac.' if gateway_ready else 'The separate authentication gateway is not responding.','lock.shield','restart_web' if running else 'start','Restart service' if running else 'Start system'),
         component('tunnel','Cloudflare tunnel',tunnel['state'],tunnel['detail']+((' '+str(tunnel['connections'])+' edge connections.') if tunnel.get('connections') else ''),'network','restart_tunnel','Reconnect tunnel'),
         component('cloudflare','Cloudflare edge','ready' if not tunnel['stale'] and tunnel.get('public_http_status',0)>=100 else 'warning','Cloudflare is answering HTTPS. The connection back to this Mac is checked separately.' if not tunnel['stale'] and tunnel.get('public_http_status',0)>=100 else 'No fresh HTTPS response from Cloudflare. Check the Mac’s network connection.','cloud'),
@@ -99,21 +105,21 @@ def read_snapshot(root=ROOT):
     access_error = None
     try:
         store = AccessStore(root/".state"/"access.sqlite")
-        devices,history = store.devices(include_history=True),store.pairing_history()
+        devices,history,policy = store.devices(include_history=True),store.pairing_history(),store.policy()
     except (sqlite3.Error,OSError):
-        devices,history = [],[]
+        devices,history,policy = [],[],None
         access_error = "Access records could not be read. Restart the system and try again."
     components.append(component('access','Pairing & browser access','warning' if access_error else 'ready',access_error or 'Private pairing and browser-access records are available.','key','open_phone','Manage access'))
     required={'background','server','phone','desktop','queue','awake','gateway','tunnel','network','history','access'}
     issues=[item for item in components if item['id'] in required and item['state'] not in ('ready','disabled')]
     summary={'state':'ready' if not issues else 'warning','title':'All components are ready' if not issues else str(len(issues))+' components need attention','detail':'Phone access is protected and the Mac is ready.' if not issues else 'Local and phone connectivity are checked independently. Open a component for recovery.'}
-    return {"components":components,"devices":devices,"pairing_history":history,"access_error":access_error,
+    return {"components":components,"devices":devices,"pairing_history":history,"access_error":access_error,"access_policy":policy,
             'summary':summary,'tunnel':tunnel,
             "phone_url":origin or ('https://'+service.HOSTNAME if service.HOSTNAME else ''),"dashboard_url":"http://127.0.0.1:8765",
             "can_pair":phone_ready and server_ready and not access_error,"running":running,"plugged_in":plugged_in,"power":power,"computer_use":computer_use_snapshot(root/'.state'/'computer-use-check.json'),"checked_at":time.time()}
 
 
-def perform(action,identifier=None,root=ROOT):
+def perform(action,identifier=None,root=ROOT,days=None):
     if action == "status":
         return {"ok":True,"snapshot":read_snapshot(root)}
     if action == 'update_locked_use':
@@ -143,6 +149,9 @@ def perform(action,identifier=None,root=ROOT):
             service.launchctl("bootout",service.TARGET)
         return {"ok":True,"message":"System stopped. It will start again at your next login."}
     store = AccessStore(root/".state"/"access.sqlite")
+    if action == "set_session_default":
+        store.set_default_days(days)
+        return {"ok":True,"message":"Default browser duration saved. Existing browser expiry dates are unchanged."}
     if action == "pair":
         server = local_json("/api/remote/status")
         origin = RemoteSettings(root/".state"/"remote.json").origin()
@@ -151,6 +160,9 @@ def perform(action,identifier=None,root=ROOT):
         return {"ok":True,"pairing":store.create_pairing(),"message":"Enter this code on your phone. It works once and expires in five minutes."}
     if not identifier or not re.fullmatch(r"[a-f0-9]{24}",identifier):
         raise ValueError("Select a valid access record.")
+    if action == "set_session_expiry":
+        store.set_device_expiry(identifier,days)
+        return {"ok":True,"message":"Browser expiry updated. Refresh that browser before its previous expiry to receive an extension."}
     if action == "revoke":
         store.revoke(identifier)
         return {"ok":True,"message":"Browser access revoked. Pair again to reconnect it."}
@@ -162,15 +174,18 @@ def perform(action,identifier=None,root=ROOT):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action",choices=["status","start","restart","restart_web","restart_tunnel","stop","pair","revoke","cancel_code","update_locked_use"])
+    parser.add_argument("action",choices=["status","start","restart","restart_web","restart_tunnel","stop","pair","revoke","cancel_code","update_locked_use","set_session_default","set_session_expiry"])
     parser.add_argument("--id")
+    parser.add_argument("--days",type=int,help="Browser duration in days; 0 means Never expires.")
     args = parser.parse_args()
     try:
-        value = perform(args.action,args.id)
+        value = perform(args.action,args.id,days=args.days)
+    except ValueError as error:
+        value = {"ok":False,"message":str(error) if args.action in ('set_session_default','set_session_expiry') else "The action could not complete. Check the component status and try again."}
     except RuntimeError as error:
         # This action raises only our fixed, user-facing installer diagnostics.
         value = {"ok":False,"message":str(error) if args.action == 'update_locked_use' else "The action could not complete. Check the component status and try again."}
-    except (OSError,sqlite3.Error,ValueError,subprocess.SubprocessError):
+    except (OSError,sqlite3.Error,subprocess.SubprocessError):
         value = {"ok":False,"message":"The action could not complete. Check the component status and try again."}
     print(json.dumps(value))
 

@@ -21,7 +21,7 @@ from urllib.request import urlopen
 
 # A missing/quarantined dependency needs operator repair, not a login restart loop.
 try:
-    from power import AWAKE_COMMAND
+    from power import AWAKE_COMMAND, read_battery_state, should_keep_awake
     from configuration import load
     from system_status import publish,read_record,record_event
 except (ImportError,OSError,SyntaxError):
@@ -148,13 +148,18 @@ def recovery_notice(name,budget,retry_at,now):
         print(f'{name} stopped. Retrying in {int(retry_at-now)} seconds; other components remain running.',flush=True)
 
 
-def recover_process(children,name,starter,retry_at,now,budget,restart=False):
+def recover_process(children,name,starter,retry_at,now,budget,restart=False,unhealthy=False):
     process=children.get(name)
     if restart:
         if process and process.poll() is None:stop_children({name:process})
         elif process:process.wait()
         children.pop(name,None);process=None;retry_at=now;budget.reset()
         write_runtime(children)
+    if unhealthy and process and process.poll() is None:
+        stop_children({name:process})
+        children.pop(name);process=None
+        retry_at=budget.failed(now)
+        write_runtime(children);recovery_notice(name,budget,retry_at,now)
     if process:
         exit_code=process.poll()
         if exit_code is not None:
@@ -174,16 +179,54 @@ def recover_process(children,name,starter,retry_at,now,budget,restart=False):
     return retry_at
 
 
-def recover_server(children,retry_at,now,restart=False,budget=None):
+def recover_server(children,retry_at,now,restart=False,budget=None,unhealthy=False):
     return recover_process(children,'server',start_server,retry_at,now,
-                           budget if budget is not None else RecoveryBudget(),restart)
+                           budget if budget is not None else RecoveryBudget(),restart,unhealthy)
+
+
+def server_healthy(pid):
+    try:
+        for port in (8765,8766):
+            with urlopen(f'http://127.0.0.1:{port}/healthz',timeout=2) as response:
+                value=json.load(response)
+            if (not isinstance(value,dict) or value.get('ok') is not True
+                    or value.get('server_pid') != pid or value.get('gateway_version') != 1
+                    or value.get('authentication_required') is not (port == 8766)):
+                return False
+        return True
+    except (OSError,ValueError):return False
+
+
+class ServerHealthMonitor:
+    """Three consecutive ten-second checks; a replacement gets a fresh grace."""
+    def __init__(self,probe=None):
+        self.probe=probe or server_healthy
+        self.pid=None;self.next_check=0;self.failures=0
+
+    def unhealthy(self,process,now):
+        if process is None or process.poll() is not None:
+            self.pid=None;self.failures=0;return False
+        if process.pid != self.pid:
+            self.pid=process.pid;self.failures=0;self.next_check=now+10
+        if now < self.next_check:return False
+        self.next_check=now+10
+        self.failures=0 if self.probe(self.pid) else self.failures+1
+        return self.failures>=3
 
 
 def start_awake():
     return subprocess.Popen(AWAKE_COMMAND)
 
 
-def recover_awake(children,retry_at,now,budget):
+def recover_awake(children,retry_at,now,budget,power_state):
+    if not should_keep_awake(power_state):
+        process = children.pop('awake', None)
+        if process:
+            if process.poll() is None: stop_children({'awake': process})
+            else: process.wait()
+            write_runtime(children)
+        budget.reset()
+        return 0
     return recover_process(children,'awake',start_awake,retry_at,now,budget)
 
 
@@ -316,7 +359,9 @@ def supervise():
             server_budget=RecoveryBudget();server_budget.started(now)
             awake_budget=RecoveryBudget()
             tunnel_budget=RecoveryBudget(initial_delay=30,max_delay=300,max_failures=None)
-            awake_retry_at=recover_awake(children,0,now,awake_budget)
+            power_state=read_battery_state()
+            next_power_check=now+5
+            awake_retry_at=recover_awake(children,0,now,awake_budget,power_state)
             tunnel_retry_at=0
             if CONFIG.remote_enabled:
                 tunnel_retry_at=recover_tunnel(children,0,now,budget=tunnel_budget)
@@ -324,11 +369,17 @@ def supervise():
             record_event(STATE,'supervisor_started',supervisor_pid=os.getpid())
             print("Companion supervision started. Check component status for readiness. Phone access: "+('configured' if CONFIG.remote_enabled else 'local only'),flush=True)
             server_retry_at=0
+            server_health=ServerHealthMonitor()
             network=NetworkRecovery();next_network_check=0
             while not stopping.wait(1):
                 now=time.monotonic();reconnect=False
-                server_retry_at=recover_server(children,server_retry_at,now,restart=consume_web_restart(),budget=server_budget)
-                awake_retry_at=recover_awake(children,awake_retry_at,now,awake_budget)
+                unhealthy=server_health.unhealthy(children.get('server'),now)
+                if unhealthy:now=time.monotonic()
+                server_retry_at=recover_server(children,server_retry_at,now,restart=consume_web_restart(),budget=server_budget,
+                                              unhealthy=unhealthy)
+                if now>=next_power_check:
+                    power_state=read_battery_state();next_power_check=now+5
+                awake_retry_at=recover_awake(children,awake_retry_at,now,awake_budget,power_state)
                 if now>=next_network_check:
                     reconnect=network.observe(network_state(),now);next_network_check=now+5
                 if CONFIG.remote_enabled:

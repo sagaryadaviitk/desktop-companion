@@ -26,6 +26,7 @@ class RpcClient:
         self.buffer = b""
         self.serial = 0
         try:
+            os.set_blocking(self.process.stdin.fileno(), False)
             self.call("initialize", {"clientInfo": {"name": "desktop-companion", "version": "1.1"},
                                       "capabilities": {"experimentalApi": True}})
             self.notify("initialized", {})
@@ -34,9 +35,42 @@ class RpcClient:
             raise
 
     def notify(self, method, params):
+        self._write({"method": method, "params": params}, time.monotonic() + self.timeout)
+
+    def _read_chunk(self):
         try:
-            self.process.stdin.write((json.dumps({"method": method, "params": params}) + "\n").encode())
-            self.process.stdin.flush()
+            chunk = os.read(self.process.stdout.fileno(), 65536)
+        except (OSError, ValueError) as error:
+            raise RuntimeUnavailable("The local runtime disconnected.") from error
+        if not chunk:
+            raise RuntimeUnavailable("The local runtime is unavailable.")
+        self.buffer += chunk
+        if len(self.buffer) > 8 * 1024 * 1024:
+            raise RuntimeUnavailable("The local runtime response exceeded the safe limit.")
+
+    def _write(self, value, deadline):
+        data = memoryview((json.dumps(value) + "\n").encode())
+        try:
+            self.selector.register(self.process.stdin, selectors.EVENT_WRITE)
+            try:
+                while data:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeUnavailable("The local runtime timed out. Check the chat before retrying.")
+                    events = self.selector.select(remaining)
+                    if not events:
+                        raise RuntimeUnavailable("The local runtime timed out. Check the chat before retrying.")
+                    for key, _ in events:
+                        if key.fileobj is self.process.stdout:
+                            self._read_chunk()
+                        else:
+                            try: written = os.write(self.process.stdin.fileno(), data[:65536])
+                            except BlockingIOError: continue
+                            if written <= 0:
+                                raise RuntimeUnavailable("The local runtime disconnected.")
+                            data = data[written:]
+            finally:
+                self.selector.unregister(self.process.stdin)
         except (OSError, ValueError) as error:
             raise RuntimeUnavailable("The local runtime disconnected.") from error
 
@@ -44,12 +78,8 @@ class RpcClient:
         self.serial += 1
         identity = self.serial
         request = {"id": identity, "method": method, "params": params}
-        try:
-            self.process.stdin.write((json.dumps(request) + "\n").encode())
-            self.process.stdin.flush()
-        except (OSError, ValueError) as error:
-            raise RuntimeUnavailable("The local runtime disconnected.") from error
         deadline = time.monotonic() + self.timeout
+        self._write(request, deadline)
         while time.monotonic() < deadline:
             while b"\n" in self.buffer:
                 line, self.buffer = self.buffer.split(b"\n", 1)
@@ -57,6 +87,8 @@ class RpcClient:
                     response = json.loads(line)
                 except (ValueError, UnicodeError):
                     continue
+                if not isinstance(response, dict):
+                    raise RuntimeUnavailable("The local runtime protocol changed. Refresh before retrying.")
                 if response.get("id") != identity:
                     continue
                 if "error" in response:
@@ -66,12 +98,7 @@ class RpcClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not self.selector.select(remaining):
                 break
-            chunk = os.read(self.process.stdout.fileno(), 65536)
-            if not chunk:
-                raise RuntimeUnavailable("The local runtime is unavailable.")
-            self.buffer += chunk
-            if len(self.buffer) > 8 * 1024 * 1024:
-                raise RuntimeUnavailable("The local runtime response exceeded the safe limit.")
+            self._read_chunk()
         raise RuntimeUnavailable("The local runtime timed out. Refresh before retrying.")
 
     def close(self):

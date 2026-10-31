@@ -158,6 +158,17 @@ class MediaStoreTests(unittest.TestCase):
 
 
 class MediaGatewayTests(unittest.TestCase):
+    def test_streamed_media_updates_cookie_after_expiry_change(self):
+        self.access.set_device_expiry(self.session['id'], 0)
+        status, headers, _ = self.request(headers={'Range':'bytes=0-1'})
+        self.assertEqual(status, 206)
+        self.assertIn('Max-Age=31536000', headers['set-cookie'])
+        self.access.set_device_expiry(self.session['id'], 1)
+        status, headers, _ = self.request(method='HEAD')
+        self.assertEqual(status, 200)
+        self.assertNotIn('Max-Age=31536000', headers['set-cookie'])
+        self.assertIn('Secure; HttpOnly; SameSite=Strict; Path=/', headers['set-cookie'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

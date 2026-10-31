@@ -8,7 +8,7 @@ import subprocess
 from urllib.error import URLError
 from unittest.mock import patch
 
-from access import AccessStore, COOKIE_NAME, PairingError, RemoteSettings
+from access import AccessStore, COOKIE_NAME, DAY_SECONDS, MAX_SESSION_DAYS, PairingError, RemoteSettings
 from companion import Bridge, CommandJournal, CompanionServer
 from read_cache import ReadCache
 from remote_access import named_configuration, preflight, public_status
@@ -32,6 +32,60 @@ class AccessStoreTests(unittest.TestCase):
         raw = self.store.path.read_bytes()
         self.assertNotIn(token.encode(), raw)
         self.assertNotIn(pairing["code"].replace("-", "").encode(), raw)
+
+    def test_default_duration_persists_and_only_changes_future_pairings(self):
+        _, original = self.store.exchange(self.store.create_pairing()['code'], 'Existing')
+        self.assertEqual(original['expires'], 1000 + 7 * DAY_SECONDS)
+        self.store.set_default_days(30)
+        reopened = AccessStore(self.store.path, clock=lambda:self.now[0])
+        self.assertEqual(reopened.policy(), {'default_days':30, 'max_days':365})
+        _, added = reopened.exchange(reopened.create_pairing()['code'], 'New')
+        self.assertEqual(added['expires'], 1000 + 30 * DAY_SECONDS)
+        self.assertEqual(next(d for d in reopened.devices() if d['id'] == original['id'])['expires'], original['expires'])
+
+    def test_duration_boundaries_and_invalid_values_leave_policy_unchanged(self):
+        token, browser = self.store.exchange(self.store.create_pairing()['code'], 'Phone')
+        for value in [1, MAX_SESSION_DAYS, 0]:
+            self.store.set_default_days(value)
+            self.assertEqual(self.store.policy()['default_days'], value)
+            self.assertEqual(self.store.set_device_expiry(browser['id'], value), 1000 + value * DAY_SECONDS if value else 0)
+        for value in [None, True, False, -1, 366, 1.5, '30', [], {}]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError): self.store.set_default_days(value)
+                with self.assertRaises(ValueError): self.store.set_device_expiry(browser['id'], value)
+                self.assertEqual(self.store.policy()['default_days'], 0)
+                self.assertEqual(self.store.authenticate(token)['expires'], 0)
+
+    def test_never_expiring_browser_survives_time_passage_but_can_be_revoked(self):
+        self.store.set_default_days(0)
+        token, browser = self.store.exchange(self.store.create_pairing()['code'], 'Phone')
+        self.assertEqual(browser['expires'], 0)
+        self.now[0] += 10 * 365 * DAY_SECONDS
+        self.assertIsNotNone(self.store.authenticate(token))
+        self.assertEqual(self.store.devices(include_history=True)[0]['status'], 'active')
+        self.assertEqual(len(self.store.devices()), 1)
+        self.store.revoke(browser['id'])
+        self.assertIsNone(self.store.authenticate(token))
+        self.assertEqual(self.store.devices(include_history=True)[0]['status'], 'revoked')
+
+    def test_existing_expiry_can_be_shortened_extended_and_set_to_never(self):
+        token, browser = self.store.exchange(self.store.create_pairing()['code'], 'Phone')
+        self.now[0] += DAY_SECONDS
+        for days in [30, 1, 0, 2]:
+            expected = self.now[0] + days * DAY_SECONDS if days else 0
+            self.assertEqual(self.store.set_device_expiry(browser['id'], days), expected)
+            self.assertEqual(self.store.authenticate(token)['expires'], expected)
+        self.now[0] = expected
+        self.assertIsNone(self.store.authenticate(token))
+
+    def test_expiry_editor_cannot_restore_expired_revoked_or_unknown_sessions(self):
+        _, expired = self.store.exchange(self.store.create_pairing()['code'], 'Expired')
+        self.now[0] = expired['expires']
+        _, revoked = self.store.exchange(self.store.create_pairing()['code'], 'Revoked')
+        self.store.revoke(revoked['id'])
+        for identifier in [expired['id'], revoked['id'], 'a'*24]:
+            with self.assertRaises(ValueError): self.store.set_device_expiry(identifier, 0)
+        self.assertEqual({d['status'] for d in self.store.devices(include_history=True)}, {'expired','revoked'})
 
     def test_new_code_replaces_old_code_and_expired_code_fails(self):
         old = self.store.create_pairing()
@@ -202,6 +256,56 @@ class GatewayTests(unittest.TestCase):
         response = self.request("/api/chats",cookie=cookie)
         self.assertEqual(response[0],200)
         self.assertEqual(json.loads(response[2])["chats"][0]["id"],CHAT)
+
+    def test_cookie_tracks_configured_and_edited_absolute_expiry_without_sliding(self):
+        self.addCleanup(self.access.set_default_days, 7)
+        self.access.set_default_days(30)
+        with patch.object(self.access, 'clock', return_value=1000) as clock:
+            cookie, header = self.pair()
+            self.assertIn(f'Max-Age={30 * DAY_SECONDS}', header)
+            token = cookie.split('=',1)[1]
+            session = self.access.authenticate(token)
+            clock.return_value = 1100
+            response = self.request('/api/auth/status', cookie=cookie)
+            self.assertIn(f'Max-Age={30 * DAY_SECONDS - 100}', response[1]['Set-Cookie'])
+            self.assertEqual(self.access.authenticate(token)['expires'], session['expires'])
+            deadline = self.access.set_device_expiry(session['id'], 90)
+            refreshed = self.request('/api/status', cookie=cookie)[1]['Set-Cookie']
+            self.assertIn(f'Max-Age={90 * DAY_SECONDS}', refreshed)
+            self.assertIn('Expires=', refreshed)
+            self.access.set_device_expiry(session['id'], 1)
+            clock.return_value = 1100 + DAY_SECONDS
+            response = self.request('/api/auth/status', cookie=cookie)
+            self.assertFalse(json.loads(response[2])['authenticated'])
+            self.assertNotIn('Set-Cookie', response[1])
+            edited = next(d for d in self.access.devices(include_history=True) if d['id'] == session['id'])
+            self.assertLess(edited['expires'], deadline)
+
+    def test_never_expiring_cookie_is_renewed_and_can_be_changed_to_finite(self):
+        self.addCleanup(self.access.set_default_days, 7)
+        self.access.set_default_days(0)
+        with patch.object(self.access, 'clock', return_value=1000) as clock:
+            cookie, header = self.pair()
+            self.assertIn(f'Max-Age={365 * DAY_SECONDS}', header)
+            token = cookie.split('=',1)[1]
+            self.assertEqual(self.access.authenticate(token)['expires'], 0)
+            clock.return_value += 400 * DAY_SECONDS
+            response = self.request('/api/auth/status', cookie=cookie)
+            self.assertTrue(json.loads(response[2])['authenticated'])
+            self.assertIn(f'Max-Age={365 * DAY_SECONDS}', response[1]['Set-Cookie'])
+            self.assertNotEqual(header, response[1]['Set-Cookie'])
+            session = self.access.authenticate(token)
+            self.access.set_device_expiry(session['id'], 2)
+            self.assertIn(f'Max-Age={2 * DAY_SECONDS}', self.request('/api/auth/status', cookie=cookie)[1]['Set-Cookie'])
+
+    def test_browser_cannot_change_expiry_policy_or_its_own_deadline(self):
+        cookie,_ = self.pair()
+        status = json.loads(self.request('/api/status',cookie=cookie)[2])
+        headers = {'X-Companion-CSRF':status['csrf']}
+        before = self.access.policy()
+        for path in ['/api/access/policy','/api/devices/expiry','/api/control/set_session_default','/api/control/set_session_expiry']:
+            self.assertEqual(self.request(path,'POST',{'days':0},cookie=cookie,headers=headers)[0],404)
+        self.assertEqual(self.access.policy(),before)
 
     def test_remote_pairing_authority_is_unavailable_even_when_authenticated(self):
         cookie,_ = self.pair()

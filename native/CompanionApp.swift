@@ -9,6 +9,8 @@ private let desktopAppPath = Bundle.main.object(forInfoDictionaryKey: "Companion
 private let cliDirectory = Bundle.main.object(forInfoDictionaryKey: "CompanionCLIPath") as? String ?? ""
 
 private let canvas = CompanionTheme.canvas
+// Select the property wrapper on SDKs that also export a State macro.
+private typealias ViewState<Value> = SwiftUI.State<Value>
 
 struct Component: Decodable, Identifiable {
     let id, title, state, detail, icon: String
@@ -33,6 +35,7 @@ struct PowerSnapshot: Decodable {
     let lid_closed, closed_lid_enabled: Bool?
     let lock_immediate: Bool?
     let display_sleep_battery_minutes, display_sleep_adapter_minutes: Int?
+    let low_battery_cutoff_percent: Int?
     let idle_guard_active: Bool
 }
 struct ComputerUseSnapshot: Decodable {
@@ -50,6 +53,7 @@ struct Snapshot: Decodable {
     let can_pair, running, plugged_in: Bool
     let checked_at: Double
     let access_error: String?
+    let access_policy: BrowserAccessPolicy?
     let power: PowerSnapshot?
     let computer_use: ComputerUseSnapshot?
     let summary: SystemSummary?
@@ -105,8 +109,8 @@ final class ControlModel: ObservableObject {
         activation = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification).sink { [weak self] _ in self?.refresh() }
     }
 
-    private func request(_ action: String, id: String? = nil, completion: @escaping (Reply?) -> Void) {
-        guard action == "status" else { requestFromProcess(action, id: id, completion: completion); return }
+    private func request(_ action: String, id: String? = nil, days: Int? = nil, completion: @escaping (Reply?) -> Void) {
+        guard action == "status" else { requestFromProcess(action, id: id, days: days, completion: completion); return }
         // Only observational status uses HTTP. Actions keep the existing native
         // process path and are never retried after a lost acknowledgement.
         let url = URL(string: "http://127.0.0.1:8765/api/control/status")!
@@ -122,13 +126,13 @@ final class ControlModel: ObservableObject {
         }.resume()
     }
 
-    private func requestFromProcess(_ action: String, id: String? = nil, completion: @escaping (Reply?) -> Void) {
+    private func requestFromProcess(_ action: String, id: String? = nil, days: Int? = nil, completion: @escaping (Reply?) -> Void) {
         let root = Bundle.main.object(forInfoDictionaryKey: "CompanionRoot") as? String ?? ""
         let python = Bundle.main.object(forInfoDictionaryKey: "CompanionPython") as? String ?? ""
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: python)
-            process.arguments = [root + "/control.py", action] + (id.map { ["--id", $0] } ?? [])
+            process.arguments = [root + "/control.py", action] + (id.map { ["--id", $0] } ?? []) + (days.map { ["--days", String($0)] } ?? [])
             process.currentDirectoryURL = URL(fileURLWithPath: root)
             process.environment = ["HOME": NSHomeDirectory(), "PATH": cliDirectory + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"]
             let output = Pipe()
@@ -165,9 +169,9 @@ final class ControlModel: ObservableObject {
                 if self.statusReadFailed { self.notice = "Connection restored. Status is current."; self.error = false }
                 self.statusReadFailed = false
                 self.statusClock = Date()
-                if let expected = self.expectedPowerSettings, expected.matches(keepWorking: value.power?.closed_lid_enabled, battery: value.power?.display_sleep_battery_minutes, adapter: value.power?.display_sleep_adapter_minutes) {
+                if let expected = self.expectedPowerSettings, expected.matches(keepWorking: value.power?.closed_lid_enabled, battery: value.power?.display_sleep_battery_minutes, adapter: value.power?.display_sleep_adapter_minutes, cutoff: value.power?.low_battery_cutoff_percent, source: value.power?.source, percent: value.power?.battery_percent) {
                     self.expectedPowerSettings = nil
-                    self.notice = "Settings verified: screen off after \(expected.batteryMinutes) min on battery and \(expected.adapterMinutes) min on power. " + (expected.keepWorking ? "Background work can continue with the lid closed." : "Normal lid-close sleep is restored.")
+                    self.notice = "Settings verified: screen off after \(expected.batteryMinutes) min on battery and \(expected.adapterMinutes) min on power. " + (expected.keepWorking ? "Closed-lid mode is managed with a 20% battery cutoff." : "Normal lid-close sleep is restored.")
                     self.error = false
                 } else if self.expectedPowerSettings != nil {
                     self.expectedPowerSettings = nil
@@ -194,7 +198,7 @@ final class ControlModel: ObservableObject {
         }
     }
 
-    func perform(_ action: String, id: String? = nil) {
+    func perform(_ action: String, id: String? = nil, days: Int? = nil) {
         guard !busy else { return }
         actionGeneration += 1
         busy = true
@@ -202,7 +206,7 @@ final class ControlModel: ObservableObject {
         notice = action == "pair" ? "Creating a one-use code…" : action == "update_locked_use" ? "Complete the OpenAI installer’s macOS authentication prompt. This app never reads or stores your password." : "Working on it…"
         if action == "restart" || action == "stop" { code = nil }
         waitingForRecovery = action == "restart" || action == "start"
-        request(action, id: id) { [weak self] reply in
+        request(action, id: id, days: days) { [weak self] reply in
             guard let self = self else { return }
             self.busy = false
             if let reply = reply, reply.ok {
@@ -471,7 +475,7 @@ struct ControlView: View {
     @AppStorage("unattended-adapter-minutes") private var adapterMinutes = UnattendedSettings.defaultAdapter
     @AppStorage("unattended-keep-working") private var keepWorking = true
     private var selectedPowerSettings: UnattendedSettings { UnattendedSettings(keepWorking: keepWorking, batteryMinutes: batteryMinutes, adapterMinutes: adapterMinutes) }
-    private var powerSettingsApplied: Bool { !model.statusStale && selectedPowerSettings.matches(keepWorking: model.snapshot?.power?.closed_lid_enabled, battery: model.snapshot?.power?.display_sleep_battery_minutes, adapter: model.snapshot?.power?.display_sleep_adapter_minutes) }
+    private var powerSettingsApplied: Bool { !model.statusStale && selectedPowerSettings.matches(keepWorking: model.snapshot?.power?.closed_lid_enabled, battery: model.snapshot?.power?.display_sleep_battery_minutes, adapter: model.snapshot?.power?.display_sleep_adapter_minutes, cutoff: model.snapshot?.power?.low_battery_cutoff_percent, source: model.snapshot?.power?.source, percent: model.snapshot?.power?.battery_percent) }
     private var attentionCount: Int { model.components.filter { $0.state == "warning" || $0.state == "stopped" }.count }
     private var overviewTitle: String {
         guard model.snapshot != nil else { return "Checking your system" }
@@ -658,7 +662,7 @@ struct ControlView: View {
                     StatusPill(state: model.statusStale ? "unknown" : model.snapshot?.power?.closed_lid_enabled == true ? "ready" : "disabled")
                 }
                 Toggle("Keep working when the lid is closed", isOn: $keepWorking).font(.system(size: 14, weight: .medium)).disabled(model.busy)
-                Text(keepWorking ? "Your screen can turn off and lock while chats continue on battery or power." : "Closing the lid will use normal macOS sleep behavior. Phone access pauses while the Mac sleeps.").font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(3)
+                Text(keepWorking ? "Your screen can turn off while chats continue on battery or power. Below 20% on battery, Companion releases its keep-awake guard and restores normal sleep." : "Closing the lid will use normal macOS sleep behavior. Phone access pauses while the Mac sleeps.").font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(3)
                 Divider()
                 Text("Screen off & lock").font(.system(size: 15, weight: .semibold))
                 HStack(spacing: 24) {
@@ -674,14 +678,14 @@ struct ControlView: View {
                     Button(powerSettingsApplied ? "Settings applied" : "Apply settings…") { model.applyPowerSettings(selectedPowerSettings) }.companionControl(prominent: true).controlSize(.large).disabled(model.busy || powerSettingsApplied || selectedPowerSettings.command == nil)
                     Button("Lock screen now") { model.lockNow() }.controlSize(.large).disabled(model.busy || model.statusStale || model.snapshot?.power?.lock_immediate != true)
                 }
-                Text("macOS asks for administrator authentication. Lid behavior is system-wide and remains set after Companion closes; switch it off here to restore normal lid sleep. No low-battery cutoff is configured.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
+                Text("macOS asks for administrator authentication on each Mac. A local power helper checks every 15 seconds, including after the control app closes. Below 20% on battery, or if power cannot be read, normal sleep is restored. Switch this off and apply to remove the helper.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
                 if let power = model.snapshot?.power {
                     Text("\(model.statusStale ? "Last known" : "Currently applied"): battery \(power.display_sleep_battery_minutes.map { "\($0) min" } ?? "unknown") · plugged in \(power.display_sleep_adapter_minutes.map { "\($0) min" } ?? "unknown")").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }.padding(22).companionCard()
             VStack(alignment: .leading, spacing: 12) {
                 Text("Ready for unattended work?").font(.system(size: 16, weight: .semibold))
-                readinessRow("Background work", ready: model.snapshot?.power?.idle_guard_active == true, detail: "Companion keeps the Mac awake while it runs.")
+                readinessRow("Background work", ready: model.components.first(where: { $0.id == "awake" })?.state == "ready", detail: "Companion releases its idle-sleep guard below 20% on battery.")
                 readinessRow("Phone connection", ready: model.components.first(where: {$0.id == "phone"})?.state == "ready", detail: "Checks the route from your phone to this Mac.")
                 Button("View system status") { model.page = "overview" }.controlSize(.large)
             }.padding(22).companionCard()
@@ -757,6 +761,9 @@ struct ControlView: View {
                     if model.snapshot?.can_pair != true { Text("Wait for Phone connection to be ready.").font(.system(size: 11)).foregroundStyle(.secondary) }
                 }
             }.padding(24).companionCard()
+            if let policy = model.snapshot?.access_policy {
+                BrowserDurationSettings(model: model, policy: policy)
+            }
             accessList
             codeHistory
         }
@@ -774,12 +781,17 @@ struct ControlView: View {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(device.name).font(.system(size: 13, weight: .semibold))
                                 Text("Paired " + shortDate(device.created)).font(.system(size: 11)).foregroundStyle(.secondary)
-                                Text(device.status == "revoked" ? "Revoked " + shortDate(device.revoked_at ?? device.created) : (device.status == "expired" ? "Expired " : "Expires ") + shortDate(device.expires)).font(.system(size: 11)).foregroundStyle(.secondary)
+                                Text(device.status == "revoked" ? "Revoked " + shortDate(device.revoked_at ?? device.created) : device.expires == 0 ? "Never expires" : (device.status == "expired" ? "Expired " : "Expires ") + shortDate(device.expires)).font(.system(size: 11)).foregroundStyle(.secondary)
                                 if let last = device.last_seen { Text("Last used " + shortDate(last)).font(.system(size: 11)).foregroundStyle(.secondary) }
                             }
                             Spacer()
                             StatusPill(state: device.status)
-                            if device.status == "active" { Button("Revoke access") { model.perform("revoke", id: device.id) }.font(.system(size: 11)).disabled(model.busy) }
+                            if device.status == "active" {
+                                VStack(alignment: .trailing, spacing: 8) {
+                                    if let policy = model.snapshot?.access_policy { BrowserExpiryButton(model: model, device: device, policy: policy) }
+                                    Button("Revoke access") { model.perform("revoke", id: device.id) }.font(.system(size: 11)).disabled(model.busy)
+                                }
+                            }
                         }.padding(17)
                         if device.id != devices.last?.id { Divider().padding(.horizontal, 17) }
                     }
@@ -808,6 +820,76 @@ struct ControlView: View {
                     }
                 }.companionCard()
             } else { Text("New pairing codes will appear here.").font(.system(size: 12)).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity, alignment: .leading).companionCard() }
+        }
+    }
+}
+
+private struct BrowserDurationInput: View {
+    let policy: BrowserAccessPolicy
+    @Binding var days: String
+    @Binding var never: Bool
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Duration")
+                TextField("Days", text: $days).frame(width: 64).textFieldStyle(.roundedBorder).disabled(never)
+                Text("days (1–\(policy.max_days))").foregroundStyle(.secondary)
+            }
+            Toggle("Never expires", isOn: $never)
+            Text("Never expires keeps access until you revoke it. Browsers can still clear cookies or limit their retention.").font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct BrowserDurationSettings: View {
+    @ObservedObject var model: ControlModel
+    let policy: BrowserAccessPolicy
+    @ViewState private var days = "7"
+    @ViewState private var never = false
+    private var value: Int? { policy.duration(days: days, never: never) }
+    private func load(_ value: Int) { days = String(value == 0 ? 7 : value); never = value == 0 }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Default browser duration").font(.system(size: 17, weight: .semibold))
+            Text("Applies when a browser pairs with this Mac. Existing browser expiry dates stay unchanged.").font(.system(size: 12)).foregroundStyle(.secondary)
+            BrowserDurationInput(policy: policy, days: $days, never: $never)
+            Button("Save default") { if let value = value { model.perform("set_session_default", days: value) } }
+                .disabled(model.busy || value == nil || value == policy.default_days)
+        }.padding(24).companionCard().onAppear { load(policy.default_days) }.onChange(of: policy.default_days) { value in load(value) }
+    }
+}
+
+private struct BrowserExpiryButton: View {
+    @ObservedObject var model: ControlModel
+    let device: Device
+    let policy: BrowserAccessPolicy
+    @ViewState private var editing = false
+    @ViewState private var days = "7"
+    @ViewState private var never = false
+    var body: some View {
+        Button("Change expiry…") {
+            days = String(policy.default_days == 0 ? 7 : policy.default_days)
+            never = device.expires == 0
+            editing = true
+        }.font(.system(size: 11)).disabled(model.busy)
+        .sheet(isPresented: $editing) {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Change browser expiry").font(.title2)
+                Text(device.name).font(.headline)
+                Text("A duration sets the expiry from now. Never expires removes the scheduled expiry.").font(.system(size: 12)).foregroundStyle(.secondary)
+                BrowserDurationInput(policy: policy, days: $days, never: $never)
+                Text("Refresh that browser before its previous expiry to receive an extension. Expired or revoked browsers must pair again.").font(.system(size: 12)).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { editing = false }.keyboardShortcut(.cancelAction)
+                    Button("Apply expiry") {
+                        if let value = policy.duration(days: days, never: never) {
+                            model.perform("set_session_expiry", id: device.id, days: value)
+                            editing = false
+                        }
+                    }.keyboardShortcut(.defaultAction).disabled(model.busy || policy.duration(days: days, never: never) == nil)
+                }
+            }.padding(28).frame(width: 440)
         }
     }
 }

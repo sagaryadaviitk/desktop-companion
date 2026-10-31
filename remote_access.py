@@ -2,6 +2,7 @@
 """Activate an HTTPS tunnel to the authenticated phone gateway only."""
 
 import argparse
+import errno
 import fcntl
 import ipaddress
 import json
@@ -11,6 +12,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from urllib.error import HTTPError, URLError
@@ -21,6 +23,10 @@ from system_status import TunnelReporter,record_event
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+class LocalRepairRequired(ValueError):
+    """A missing/inaccessible local dependency must not enter network retries."""
 
 
 def inspected_tunnel_reason(runner=subprocess.run):
@@ -76,7 +82,7 @@ def named_configuration(state, hostname, tunnel_id, port, credentials_root=None)
         raise ValueError("A canonical tunnel UUID is required.")
     credentials = (credentials_root or Path.home() / ".cloudflared") / (tunnel_id + ".json")
     if not credentials.is_file():
-        raise ValueError("The named tunnel's credentials file is unavailable.")
+        raise LocalRepairRequired("The named tunnel's credentials file is unavailable.")
     config = state / "cloudflared-named.yml"
     # JSON is also valid YAML and avoids interpolation into a config template.
     config.write_text(json.dumps({"tunnel": tunnel_id, "credentials-file": str(credentials), "ingress": [
@@ -164,9 +170,13 @@ def main():
             return
         executable = shutil.which("cloudflared")
         if not executable:
-            raise SystemExit("cloudflared is not installed.")
+            if reporter:reporter.update('failed',reason='controller_repair_required')
+            raise LocalRepairRequired("cloudflared is unavailable. Repair the approved local installation before reconnecting.")
         if args.hostname:
-            config = named_configuration(state, args.hostname, args.tunnel_id, port)
+            try:config = named_configuration(state, args.hostname, args.tunnel_id, port)
+            except LocalRepairRequired:
+                if reporter:reporter.update('failed',reason='controller_repair_required')
+                raise
         else:
             config = state / "cloudflared.yml"
             config.write_text("{}\n")
@@ -175,7 +185,13 @@ def main():
         # HTTP/2 avoids waiting on blocked UDP/QUIC before transport fallback.
         command = [executable,"tunnel","--config",str(config),"--no-autoupdate","--protocol","http2","--metrics","127.0.0.1:0","--loglevel","info","--transport-loglevel","warn"]
         command.extend(["run",args.tunnel_id] if args.hostname else ["--url",f"http://127.0.0.1:{port}"])
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=environment)
+        try:
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=environment)
+        except OSError as error:
+            if error.errno in (errno.ENOENT,errno.ENOTDIR,errno.EACCES,errno.ENOEXEC):
+                if reporter:reporter.update('failed',reason='controller_repair_required')
+                raise LocalRepairRequired('The tunnel executable cannot run. Review runtime/security status before repairing the approved installation.') from error
+            raise
         reporter.update(connector_pid=process.pid)
         record_event(state,'connector_started',controller_pid=os.getpid(),connector_pid=process.pid)
         lines = queue.Queue(maxsize=1000)
@@ -257,8 +273,15 @@ def main():
                     settings.set_origin(None)
 
 
-if __name__ == "__main__":
+def run():
     try:
         main()
+    except LocalRepairRequired as error:
+        print(str(error),file=sys.stderr)
+        raise SystemExit(78)
     except (OSError, ValueError, RuntimeError, URLError) as error:
         raise SystemExit(str(error))
+
+
+if __name__ == "__main__":
+    run()

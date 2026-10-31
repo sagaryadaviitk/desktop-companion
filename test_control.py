@@ -1,4 +1,6 @@
 import json
+import io
+from contextlib import redirect_stdout
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -65,6 +67,8 @@ class AccessHistoryTests(unittest.TestCase):
             db.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?)',('a'*24,AccessStore.digest(token),'fixture-csrf','Existing phone',900,2000))
         store=AccessStore(path,clock=lambda:1000)
         self.assertIsNotNone(store.authenticate(token))
+        self.assertEqual(store.policy()['default_days'],7)
+        self.assertEqual(store.authenticate(token)['expires'],2000)
         self.assertEqual(store.devices()[0]['name'],'Existing phone')
         store.revoke('a'*24)
         self.assertIsNone(store.authenticate(token))
@@ -95,8 +99,27 @@ class NativeControlTests(unittest.TestCase):
             value=control.read_snapshot(self.root)
         self.assertFalse(value['can_pair'])
         self.assertFalse(value['running'])
+        self.assertEqual(value['access_policy'],{'default_days':7,'max_days':365})
         self.assertEqual(value['components'][1]['state'],'stopped')
         public.assert_not_called()
+
+    def test_unreadable_access_store_disables_duration_controls(self):
+        failure=subprocess.CompletedProcess([],1,'','')
+        with patch('control.service.launchctl',return_value=failure),patch('control.local_json',return_value=None),patch('control.subprocess.run',return_value=failure),patch('control.AccessStore',side_effect=sqlite3.OperationalError('fixture unavailable')):
+            value=control.read_snapshot(self.root)
+        self.assertIsNone(value['access_policy'])
+        self.assertEqual(value['devices'],[])
+        self.assertIsNotNone(value['access_error'])
+        self.assertFalse(value['can_pair'])
+
+    def test_managed_lid_readiness_requires_both_fresh_cutoff_and_actual_sleep_setting(self):
+        failure=subprocess.CompletedProcess([],1,'','')
+        for percent,disabled,cutoff,expected in [(80,True,20,'ready'),(19,False,20,'ready'),(80,False,20,'warning'),(19,True,20,'warning'),(80,True,None,'warning')]:
+            with self.subTest(percent=percent,disabled=disabled,cutoff=cutoff):
+                state={'source':'battery','battery_percent':percent,'closed_lid_enabled':disabled,'low_battery_cutoff_percent':cutoff}
+                with patch('control.service.launchctl',return_value=failure),patch('control.local_json',return_value=None),patch('control.subprocess.run',return_value=failure),patch('control.read_power_state',return_value=state):
+                    value=control.read_snapshot(self.root)
+                self.assertEqual(next(item for item in value['components'] if item['id']=='lid')['state'],expected)
 
     def test_snapshot_omits_session_tokens_and_local_csrf(self):
         store=AccessStore(self.root/'.state'/'access.sqlite')
@@ -118,6 +141,48 @@ class NativeControlTests(unittest.TestCase):
             self.assertTrue(control.perform('revoke',session['id'],self.root)['ok'])
         self.assertIsNone(store.authenticate(token))
         local.assert_not_called()
+
+    def test_expiry_controls_persist_without_the_http_server(self):
+        store=AccessStore(self.root/'.state'/'access.sqlite')
+        token,session=store.exchange(store.create_pairing()['code'],'Fixture phone')
+        previous=store.authenticate(token)['expires']
+        with patch('control.local_json') as local:
+            self.assertTrue(control.perform('set_session_default',root=self.root,days=0)['ok'])
+            self.assertEqual(store.policy()['default_days'],0)
+            self.assertEqual(store.authenticate(token)['expires'],previous)
+            self.assertTrue(control.perform('set_session_expiry',session['id'],self.root,days=0)['ok'])
+            self.assertEqual(store.authenticate(token)['expires'],0)
+            with self.assertRaises(ValueError): control.perform('set_session_expiry','invalid',self.root,days=7)
+            with self.assertRaises(ValueError): control.perform('set_session_default',root=self.root,days=366)
+            store.revoke(session['id'])
+            with self.assertRaises(ValueError): control.perform('set_session_expiry',session['id'],self.root,days=7)
+        local.assert_not_called()
+
+    def test_native_cli_accepts_duration_arguments_and_reports_validation_errors(self):
+        original=control.perform
+        def isolated(action,identifier=None,days=None):
+            return original(action,identifier,self.root,days=days)
+        store=AccessStore(self.root/'.state'/'access.sqlite')
+        _,session=store.exchange(store.create_pairing()['code'],'Fixture phone')
+        for arguments,ok,message in [
+            (['set_session_default','--days','30'],True,'Default browser duration saved'),
+            (['set_session_expiry','--id',session['id'],'--days','0'],True,'Browser expiry updated'),
+            (['set_session_default','--days','-1'],False,'Choose 1–365 days'),
+            (['set_session_expiry','--id','invalid','--days','7'],False,'Select a valid access record'),
+            (['set_session_default'],False,'Choose 1–365 days'),
+        ]:
+            output=io.StringIO()
+            with self.subTest(arguments=arguments),patch('sys.argv',['control.py',*arguments]),patch('control.perform',side_effect=isolated),redirect_stdout(output):
+                control.main()
+            value=json.loads(output.getvalue())
+            self.assertEqual(value['ok'],ok)
+            self.assertIn(message,value['message'])
+        output=io.StringIO()
+        with patch('sys.argv',['control.py','set_session_default','--days','30']),patch('control.perform',side_effect=OSError('private fixture path')),redirect_stdout(output):
+            control.main()
+        value=json.loads(output.getvalue())
+        self.assertFalse(value['ok'])
+        self.assertNotIn('private fixture path',value['message'])
 
     def test_local_only_snapshot_cannot_pair_through_a_saved_remote_origin(self):
         RemoteSettings(self.root/'.state'/'remote.json').set_origin('https://phone.example')

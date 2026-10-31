@@ -51,7 +51,7 @@ The native build check runs the Swift compiler and verifies the selected macOS S
 
 Native app updates copy the completed build into a temporary folder beside the destination before replacing the installed app. A failed copy leaves the working app untouched; a failed activation restores it. The previous version is retained at `~/Applications/.Desktop Companion.previous`. Because the replacement renames stay on the destination disk, the source folder can live on a different volume. A running copy is not restarted by this installer; reopen the control app after a successful update.
 
-A clean copy is configured **locally only**; after explicit service installation, the dashboard is <http://127.0.0.1:8765>. Setup does not change sleep, passwords, FileVault, or Locked Use. Choose those settings separately in the native app when needed. The setup check reads history metadata and checks dependencies; it does not read credentials or send chat instructions.
+A clean copy is configured **locally only**; after explicit service installation, the dashboard is <http://127.0.0.1:8765>. Setup does not change sleep, passwords, FileVault, or Locked Use. For remote work with the display off or lid closed, open **Unattended mode → Keep working when the lid is closed → Apply settings…** and authenticate in macOS on this Mac. This installs Companion’s local power helper: charger or battery at 20% and above stays awake; below 20% on battery, normal sleep is allowed. The defaults turn the screen off after 5 minutes on battery and 10 minutes on power. These behaviors ship with the source, but administrator authorization is local to each Mac. Before uninstalling, turn the setting off and apply to remove the helper. The setup check reads history metadata and checks dependencies; it does not read credentials or send chat instructions.
 
 ## Background installation and security recovery
 
@@ -126,6 +126,8 @@ If you later change the configured desktop app path, rerun doctor and rebuild wi
 To return to local-only mode, run `"$COMPANION_PYTHON" manage.py configure --local` and restart the service.
 
 ## Update, validate, and export
+
+The combined startup/expiry/battery/recovery update includes supervisor code. Apply the complete source and native build together, then perform one coordinated `service.py restart` with no pending command. Enable the battery-aware lid policy separately in **Unattended mode → Apply settings…** and complete the normal macOS administrator prompt. Verify login/background-item approval on each Mac. No power helper, automatic login or wake schedule is installed by a source update alone.
 
 For a Git clone, follow [After pulling an update](README.md#after-pulling-an-update), including its one-time action for installations upgrading from `999f022` or the old recovery service. Keep `config.local.json` and `.state/` on the destination Mac; they contain machine settings and private runtime data. A source pull does not require copying another Mac's configuration, rerunning setup or changing its hostname.
 
