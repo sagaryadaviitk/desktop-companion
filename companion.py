@@ -5,6 +5,7 @@ import argparse
 from contextlib import closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,7 @@ import threading
 import time
 from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from http.cookies import CookieError, SimpleCookie
 from urllib.parse import parse_qs, urlsplit
 
@@ -681,6 +683,18 @@ class CommandJournal:
 class CompanionServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 32
+
+    def server_bind(self):
+        # A numeric loopback address needs no name lookup. HTTPServer's default
+        # getfqdn call can otherwise stall startup on a managed DNS resolver.
+        try:
+            loopback = ipaddress.ip_address(self.server_address[0]).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            return super().server_bind()
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def __init__(self, address, history, bridge, journal, access=None, remote=False, settings=None, gateway_port=None, inbox=None, account=None, runtime=None,photos=None,new_chat=None,media=None,read_cache=None,local_assistant=None,local_error=None):
         if remote and (access is None or settings is None):
