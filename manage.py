@@ -74,7 +74,7 @@ def cli_queue_capabilities(executable):
     flags=set(re.findall(r'(?<![\w-])--(?:thread|message|image)(?![\w-])',result.stdout))
     if result.returncode or not {'--thread','--message'}<=flags:
         return False,'The CLI does not advertise the required queue --thread/--message flags. See COMPATIBILITY.md.'
-    photo='Photo queue flag is available.' if '--image' in flags else 'Photo queue flag is unavailable; photo delivery needs separate verification.'
+    photo='Photo queue RPC capability is checked on first use; live photo delivery needs separate verification.'
     return True,'Message-queue help is supported. '+photo+' Sign-in and live delivery are not tested.'
 
 

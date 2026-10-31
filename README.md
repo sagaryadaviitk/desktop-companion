@@ -187,6 +187,14 @@ Working status comes from a bounded snapshot of the running desktop owner. A sav
 
 ## Running and recovery
 
+The core remains Python standard library plus the native Swift app; it adds no Python packages, cloud service, or resident model. Recovery runs in the existing supervisor. Photo RPC capability is checked lazily on first use using the installed CLI's read-only schema generator; a successful result is reused.
+
+The supervisor checks both loopback listeners every ten seconds, with a two-second limit per request. Three consecutive failures restart only the web process through its existing bounded backoff; the tunnel and awake guard keep running. Health checks verify the child PID and detect a command stuck for two minutes without waiting for its journal lock. Uncertain command records survive the restart and are never automatically replayed. Runtime RPC deadlines include both pipe writes and reply reads, including large Unicode inputs.
+
+Missing or inaccessible tunnel executables and missing local credentials use a repair exit code, pausing that component instead of retrying them as network outages. After repairing the approved installation, use **Reconnect tunnel**. Normal network interruptions keep retrying automatically, and macOS joining a saved Wi-Fi network triggers the existing reconnection path.
+
+When upgrading to this combined startup, expiry, battery and recovery release, update the complete source, rebuild/reopen the native app, and perform one coordinated `service.py restart` while no command is pending. `restart-web` alone cannot load the new supervisor. Preserve the Mac's own state and configuration. The battery helper is enabled separately through **Unattended mode → Apply settings…**, using the standard macOS administrator prompt; pulling or merging code does not install it or change power settings.
+
 Python 3.11+ is required; the desktop bridge has no pip dependencies or separate OpenAI API keys. Optional Exo API profiles have their own authentication. Select `COMPANION_PYTHON` using [SETUP](SETUP.md#prerequisites) in each terminal. From this folder:
 
 ```sh
@@ -216,6 +224,8 @@ PATH="$COMPANION_CLI_DIR:$PATH" "$COMPANION_PYTHON" companion.py
 After reviewing the security requirements, use `"$COMPANION_PYTHON" service.py install --background-install-approved` to explicitly reinstall login startup, or `"$COMPANION_PYTHON" service.py uninstall` to remove it while retaining private state. Rebuild native changes with `"$COMPANION_PYTHON" build_app.py`, then reopen the control app. Machine settings are in ignored `config.local.json`; source-only exports never include it.
 
 ## Unattended operation and lock state
+
+Automatic recovery starts after login/FileVault unlock. On an awake Mac, attaching power resumes the awake guard and returning network connectivity resumes phone access without reopening the control app. While macOS is fully asleep, Companion cannot poll power or Wi-Fi; it resumes after a system/hardware wake. Charger/lid/network wake behavior must be checked on each Mac. Companion does not add periodic wake timers, alter firmware wake settings, enable automatic login, or bypass FileVault. The small root-owned power helper below is the additional macOS background item needed to manage the closed-lid sleep override safely.
 
 The service runs `caffeinate -is` on charger power and on battery at 20% or above. It releases that guard below 20% on battery, or if the power source/percentage cannot be read, and resumes it when power recovers. It does not request display-awake or simulated-user-activity assertions. The screen can turn off and lock while background work continues.
 

@@ -27,7 +27,7 @@ from power import cached_power_state
 from inbox import Inbox
 from runtime import AccountMonitor, SharedRuntime, RuntimeUnavailable
 from questions import pending_questions, answer_envelope, answer_identity, queued_question_answers, replies as question_replies
-from desktop_runtime import DesktopRuntime,queue_photo_message,QueueNotClaimed,change_queued_message
+from desktop_runtime import DesktopRuntime,queue_photo_message,photo_queue_supported,QueueNotClaimed,change_queued_message
 from approvals import ApprovalChanged, digest as approval_digest
 from computer_use import computer_use_snapshot
 from read_cache import ReadCache
@@ -588,12 +588,11 @@ class Bridge:
         self.executable = shutil.which("codex")
         self.runner = runner
         self.queue_supported = False
-        self.photos_supported = False
+        self.photos_supported = None
         if self.executable:
             try:
                 result = runner([self.executable, "queue", "--help"], capture_output=True, text=True, timeout=3)
                 self.queue_supported = result.returncode == 0 and "--thread" in result.stdout and "--message" in result.stdout
-                self.photos_supported = self.queue_supported and '--image' in result.stdout
             except (OSError, subprocess.TimeoutExpired):
                 pass
 
@@ -613,8 +612,10 @@ class Bridge:
         availability = self.availability()
         if not availability["available"]:
             raise ControlError(availability["reason"])
-        if photos and not self.photos_supported:raise ControlError('This desktop CLI does not support photo attachments.')
         if photos:
+            if not self.photos_supported:
+                self.photos_supported = photo_queue_supported(self.executable,self.runner)
+            if not self.photos_supported:raise ControlError('The installed app-server does not advertise photo queue support. Text queueing remains available.')
             try:return queue_photo_message(thread_id,message,photos,self.executable)
             except RuntimeUnavailable as error:raise ControlError(str(error),uncertain=True) from error
         command=[self.executable,"queue","--thread",thread_id,"--message",message]
@@ -634,13 +635,20 @@ class Bridge:
 
 
 class CommandJournal:
-    def __init__(self, path):
+    def __init__(self, path, clock=time.monotonic):
         self.path = Path(path)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.lock = threading.Lock()
+        self.clock = clock
+        self.active_since = None
         with closing(sqlite3.connect(self.path)) as connection, connection:
             connection.execute("CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)")
         self.path.chmod(0o600)
+
+    def healthy(self):
+        # Do not acquire the command lock: that is precisely what may be stuck.
+        active = self.active_since
+        return active is None or 0 <= self.clock() - active < 120
 
     def lookup(self, identity, payload=None):
         with self.lock, closing(sqlite3.connect(self.path)) as connection:
@@ -670,14 +678,18 @@ class CommandJournal:
             pending = {"state": "unknown", "message": "Delivery is unconfirmed. Check the desktop before resending."}
             connection.execute("INSERT OR REPLACE INTO commands VALUES (?,?,?)", (command_id, fingerprint, json.dumps(pending)))
             connection.commit()
+            self.active_since = self.clock()
             try:
-                result = action()
-            except ControlError as error:
-                result = {"state": "unknown" if error.uncertain else "rejected", "message": str(error)}
-                if error.retryable and not error.uncertain:result['retryable']=True
-            connection.execute("UPDATE commands SET result=? WHERE id=?", (json.dumps(result), command_id))
-            connection.commit()
-            return result
+                try:
+                    result = action()
+                except ControlError as error:
+                    result = {"state": "unknown" if error.uncertain else "rejected", "message": str(error)}
+                    if error.retryable and not error.uncertain:result['retryable']=True
+                connection.execute("UPDATE commands SET result=? WHERE id=?", (json.dumps(result), command_id))
+                connection.commit()
+                return result
+            finally:
+                self.active_since = None
 
 
 class CompanionServer(ThreadingHTTPServer):
@@ -919,7 +931,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._browser_cookie = None
         if self.path == "/healthz" and self.headers.get("Host") == f"127.0.0.1:{self.server.server_port}":
-            return self.reply(200, {"ok": True, "authentication_required": self.server.remote, "gateway_version": 1})
+            healthy = self.server.journal.healthy()
+            return self.reply(200 if healthy else 503, {"ok": healthy, "authentication_required": self.server.remote, "gateway_version": 1, "server_pid": os.getpid()})
         if not self.valid_origin():
             return self.reply(403, {"error": "This origin is not enabled."})
         parsed = urlsplit(self.path)

@@ -227,7 +227,7 @@ class DoctorTests(unittest.TestCase):
     def test_cli_without_photo_flag_preserves_text_queue_support_and_reports_limit(self):
         self.runner.return_value=subprocess.CompletedProcess([],0,stdout='--thread --message',stderr='')
         ok,detail=cli_queue_capabilities(str(self.cli))
-        self.assertTrue(ok);self.assertIn('Photo queue flag is unavailable',detail)
+        self.assertTrue(ok);self.assertIn('Photo queue RPC capability is checked on first use',detail)
 
     def test_cli_help_requires_exact_option_tokens_and_does_not_infer_photo_support(self):
         for output in ('--thread-id --message-file','--thread --message-file','--thread-id --message'):
@@ -236,13 +236,13 @@ class DoctorTests(unittest.TestCase):
                 self.assertFalse(cli_queue_capabilities(str(self.cli))[0])
         self.runner.return_value=subprocess.CompletedProcess([],0,stdout='--thread --message --image-size',stderr='')
         ok,detail=cli_queue_capabilities(str(self.cli))
-        self.assertTrue(ok);self.assertIn('Photo queue flag is unavailable',detail)
+        self.assertTrue(ok);self.assertIn('Photo queue RPC capability is checked on first use',detail)
 
     def test_cli_help_accepts_multiline_options_with_values(self):
         output='Usage: codex queue [OPTIONS]\n\nOptions:\n  --thread <THREAD_ID>\n  --message=<MESSAGE>\n  --image <PATH>\n'
         self.runner.return_value=subprocess.CompletedProcess([],0,stdout=output,stderr='')
         ok,detail=cli_queue_capabilities(str(self.cli))
-        self.assertTrue(ok);self.assertIn('Photo queue flag is available',detail)
+        self.assertTrue(ok);self.assertIn('Photo queue RPC capability is checked on first use',detail)
 
 
 class DoctorCommandTests(unittest.TestCase):

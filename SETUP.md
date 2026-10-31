@@ -127,6 +127,8 @@ To return to local-only mode, run `"$COMPANION_PYTHON" manage.py configure --loc
 
 ## Update, validate, and export
 
+The combined startup/expiry/battery/recovery update includes supervisor code. Apply the complete source and native build together, then perform one coordinated `service.py restart` with no pending command. Enable the battery-aware lid policy separately in **Unattended mode → Apply settings…** and complete the normal macOS administrator prompt. Verify login/background-item approval on each Mac. No power helper, automatic login or wake schedule is installed by a source update alone.
+
 For a Git clone, follow [After pulling an update](README.md#after-pulling-an-update), including its one-time action for installations upgrading from `999f022` or the old recovery service. Keep `config.local.json` and `.state/` on the destination Mac; they contain machine settings and private runtime data. A source pull does not require copying another Mac's configuration, rerunning setup or changing its hostname.
 
 A source-only ZIP has no Git history: obtain a reviewed replacement bundle and release/upgrade instructions from its owner. Preserve private state and do not overwrite a working installation or move the installed source folder during an active operation. Use a coordinated replacement/rollback plan for that folder, then apply the same changed-file runtime actions below. Do not run Git pull commands in an extracted ZIP.
