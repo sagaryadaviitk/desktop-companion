@@ -8,15 +8,38 @@ window.ChatMarkdown = (() => {
     return result;
   };
 
+  function privateImage(target) {
+    let url;
+    try {url = new URL(target, window.location.origin);} catch (_) {return null;}
+    if (url.origin !== window.location.origin || url.hash || url.username || url.password) return null;
+    const path = url.pathname + url.search;
+    if (target !== path && target !== url.origin + path) return null;
+    return /^\/api\/media\/[a-z0-9][a-z0-9-]{0,79}\/poster(?:\?v=[a-f0-9]{64})?$/.test(path) ||
+      /^\/api\/photos\/[a-f0-9]{32}$/.test(path) ? path : null;
+  }
+
   function inline(parent, text, depth = 0) {
     if (depth > 6) {parent.append(document.createTextNode(text));return;}
-    const tokens = /\\[\\`*_[\]()#>|-]|`[^`\n]+`|\[[^\]\n]+\]\((?:[^()\n]|\([^()\n]*\))*\)|\*\*[^*\n]+\*\*|(?<![\w])__[^_\n]+__(?![\w])|~~[^~\n]+~~|\*[^*\n]+\*|(?<![\w])_[^_\n]+_(?![\w])/g;
+    const tokens = /\\[\\`*_[\]()#>|!-]|`[^`\n]+`|!\[[^\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)|\[[^\]\n]+\]\((?:[^()\n]|\([^()\n]*\))*\)|\*\*[^*\n]+\*\*|(?<![\w])__[^_\n]+__(?![\w])|~~[^~\n]+~~|\*[^*\n]+\*|(?<![\w])_[^_\n]+_(?![\w])/g;
     let cursor = 0;
     for (const match of text.matchAll(tokens)) {
       parent.append(document.createTextNode(text.slice(cursor, match.index)));
       const token = match[0]; let result;
       if (token[0] === "\\") result = document.createTextNode(token.slice(1));
       else if (token[0] === "`") result = node("code", token.slice(1, -1));
+      else if (token[0] === "!") {
+        const split = token.lastIndexOf("]("), label = token.slice(2, split);
+        const target = token.slice(split + 2, -1).trim().replace(/^<|>$/g, "");
+        const source = privateImage(target);
+        if (source) {
+          result = node("a", undefined, "chat-image-link");
+          result.href = source; result.target = "_blank"; result.rel = "noopener noreferrer";
+          const image = node("img", undefined, "chat-image");
+          image.src = source; image.alt = label || "Shared image"; image.loading = "lazy";
+          image.decoding = "async"; image.referrerPolicy = "no-referrer";
+          result.append(image);
+        } else {result = node("span", (label || "Image") + " (image unavailable)");}
+      }
       else if (token[0] === "[") {
         const split = token.lastIndexOf("]("), label = token.slice(1, split);
         const target = token.slice(split + 2, -1).trim().replace(/^<|>$/g, "");

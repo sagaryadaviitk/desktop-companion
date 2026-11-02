@@ -96,6 +96,21 @@ class MediaStore:
             yield stream, asset, info
 
     def publish(self, source, identifier, title, description='', version='', duration_seconds=None, poster=None, captions=None):
+        if source is None:
+            raise ValueError('A video source is required')
+        return self._publish(source, identifier, title, description, version,
+                             duration_seconds, poster, captions)
+
+    def publish_image(self, source, identifier, title):
+        """Explicit image snapshot for chat, using the existing authenticated poster route.
+
+        Image-only records do not appear as videos in the review library.
+        """
+        if source is None:
+            raise ValueError('An image source is required')
+        return self._publish(None, identifier, title, poster=source, image_only=True)
+
+    def _publish(self, source, identifier, title, description='', version='', duration_seconds=None, poster=None, captions=None, image_only=False):
         if not ITEM_ID.fullmatch(identifier): raise ValueError('Use a short lowercase media ID')
         if not 1 <= len(title.strip()) <= 160 or len(description) > 2000 or len(version) > 80:
             raise ValueError('Invalid media description')
@@ -109,6 +124,8 @@ class MediaStore:
             os.chmod(lock, 0o600)
             fcntl.flock(guard, fcntl.LOCK_EX)
             records = self._records()
+            if image_only and 'video' in records.get(identifier, {}).get('assets', {}):
+                raise ValueError('An image cannot replace an existing video item')
             directory = self.root / identifier
             if directory.is_symlink(): raise ValueError('Invalid media directory')
             directory.mkdir(mode=0o700, exist_ok=True)
@@ -155,6 +172,11 @@ class MediaStore:
                 os.replace(temporary, self.root / 'index.json')
             finally:
                 if os.path.exists(temporary): os.unlink(temporary)
+        if image_only:
+            asset = assets['poster']
+            return {'id': identifier, 'title': title.strip(),
+                    'image_url': f"/api/media/{identifier}/poster?v={asset['name'].split('.')[0]}",
+                    'bytes': asset['bytes']}
         return next(item for item in self.catalog() if item['id'] == identifier)
 
 
@@ -168,10 +190,16 @@ def main():
     parser.add_argument('--duration', type=float)
     parser.add_argument('--poster', type=Path)
     parser.add_argument('--captions', type=Path)
+    parser.add_argument('--image-only', action='store_true', help='Share only a JPEG/PNG in chat, outside the video library.')
     args = parser.parse_args()
-    item = MediaStore(Path(__file__).resolve().parent / '.state' / 'media').publish(
-        args.source, args.id, args.title, args.description, args.version, args.duration, args.poster, args.captions)
-    print(json.dumps({'id': item['id'], 'review_path': '/media?item=' + item['id'], 'bytes': item['bytes']}))
+    store = MediaStore(Path(__file__).resolve().parent / '.state' / 'media')
+    if args.image_only:
+        if args.poster or args.captions or args.duration or args.description or args.version:
+            parser.error('--image-only accepts the source, ID and title only')
+        print(json.dumps(store.publish_image(args.source, args.id, args.title)))
+    else:
+        item = store.publish(args.source, args.id, args.title, args.description, args.version, args.duration, args.poster, args.captions)
+        print(json.dumps({'id': item['id'], 'review_path': '/media?item=' + item['id'], 'bytes': item['bytes']}))
 
 
 if __name__ == '__main__': main()
