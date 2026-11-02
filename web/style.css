@@ -86,6 +86,8 @@ input[type=search]::placeholder {color:#a0b3a6}
 .message-text h1 {font-size:23px}.message-text h2 {font-size:20px}.message-text h3 {font-size:17px}.message-text h4,.message-text h5,.message-text h6 {font-size:14px}
 .message-text strong {font-weight:650;color:#20342a}
 .message-text a {color:var(--accent);text-decoration-color:#9abca4;text-underline-offset:3px}
+.message-text .chat-image-link {display:block;max-width:100%;margin:12px 0}
+.message-text .chat-image {display:block;width:auto;max-width:100%;height:auto;border-radius:10px}
 .message-text ul,.message-text ol {padding-left:23px;margin:12px 0 17px}
 .message-text li {margin:7px 0;white-space:pre-wrap;padding-left:3px}
 .message-text li.indent-1 {margin-left:16px}.message-text li.indent-2 {margin-left:32px}.message-text li.indent-3 {margin-left:48px}.message-text li.indent-4,.message-text li.indent-5,.message-text li.indent-6 {margin-left:60px}

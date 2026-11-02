@@ -52,6 +52,29 @@ class MediaStoreTests(unittest.TestCase):
             self.assertEqual(stream.read(), VIDEO)
             self.assertEqual(asset['bytes'], len(VIDEO))
 
+    def test_image_snapshot_uses_protected_poster_route_without_a_fake_video(self):
+        before = self.store.catalog()
+        item = self.store.publish_image(self.source / 'poster.png', 'review-image-a', 'Thumbnail A')
+        digest = hashlib.sha256(POSTER).hexdigest()
+        self.assertEqual(item['image_url'], '/api/media/review-image-a/poster?v=' + digest)
+        self.assertEqual(self.store.catalog(), before)
+        (self.source / 'poster.png').write_bytes(b'replaced source')
+        with self.store.open_asset('review-image-a', 'poster', digest) as (stream, asset, _):
+            self.assertEqual(stream.read(), POSTER)
+            self.assertEqual(asset['mime'], 'image/png')
+        with self.assertRaises(FileNotFoundError):
+            with self.store.open_asset('review-image-a', 'video'):
+                self.fail('An image snapshot must not masquerade as a video.')
+
+    def test_image_publish_cannot_replace_video_or_commit_an_unsupported_source(self):
+        before = (self.store.root / 'index.json').read_bytes()
+        for source, identifier in [(self.source / 'poster.png', IDENTIFIER),
+                                   (self.source / 'pilot.mp4', 'review-image-a'),
+                                   (None, 'review-image-a')]:
+            with self.subTest(identifier=identifier, source=source), self.assertRaises(ValueError):
+                self.store.publish_image(source, identifier, 'Image')
+            self.assertEqual((self.store.root / 'index.json').read_bytes(), before)
+
     def test_catalog_exposes_only_metadata_and_protected_role_urls(self):
         serialized = json.dumps(self.store.catalog())
         for private in [str(self.root), str(self.source), 'mtime_ns', 'published_at', 'source_path']:
@@ -244,6 +267,22 @@ class MediaGatewayTests(unittest.TestCase):
         self.assertEqual(headers['accept-ranges'], 'bytes')
         self.assertIn('private', headers['cache-control'])
         self.assert_private(headers)
+
+    def test_inline_image_only_snapshot_keeps_pairing_and_revocation_checks(self):
+        item = self.store.publish_image(self.source / 'poster.png', 'review-image-a', 'Thumbnail A')
+        path = item['image_url']
+        status, headers, body = self.request(path, authenticated=False)
+        self.assertEqual(status, 401)
+        self.assertNotIn(POSTER, body)
+        status, headers, body = self.request(path)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, POSTER)
+        self.assertEqual(headers['content-type'], 'image/png')
+        self.assert_private(headers)
+        self.access.revoke(self.session['id'])
+        status, _, body = self.request(path)
+        self.assertEqual(status, 401)
+        self.assertNotIn(POSTER, body)
 
     def test_range_requests_return_exact_intervals(self):
         for requested, first, last in [('bytes=0-1', 0, 1), ('bytes=21-', 21, len(VIDEO)-1),
