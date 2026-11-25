@@ -27,6 +27,7 @@ let questionSignature='';
 const queueSteering=new Set();
 const photoDrafts=new Map(),photoUploads=new Map();
 let resultTimer=null;
+let desktopOpenRequest=null;
 let newChatFlow=null,healthFlow=null,queueUI=null,connectingChat=false,followDesktopSelection=false,renamingChat=false;
 function showCommandResult(message,temporary=false){clearTimeout(resultTimer);el("command-result").textContent=message;if(temporary)resultTimer=setTimeout(()=>{if(el("command-result").textContent===message)el("command-result").textContent="";},7000);}
 const mobile=()=>window.matchMedia("(max-width:760px)").matches;
@@ -876,7 +877,14 @@ async function connectChat(){
   try{
     // Opening is requested exactly once. Its acknowledgement is not proof that
     // the desktop has finished loading the chat; only fresh reads confirm that.
-    const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});
+    // Serialize desktop window opens across rapid selections. Only the currently
+    // selected chat may start a request after an earlier open has settled.
+    if(desktopOpenRequest)await desktopOpenRequest.catch(()=>{});
+    if(!isCurrent())return;
+    const opening=api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});
+    desktopOpenRequest=opening;
+    let result;
+    try{result=await opening;}finally{if(desktopOpenRequest===opening)desktopOpenRequest=null;}
     if(!isCurrent())return;
     showCommandResult(result.message);
     const outcome=await CompanionConversation.waitForConnection({read:()=>refreshChat(true),isCurrent,retryAfter:()=>Math.max(0,readRetryAt-Date.now()),

@@ -107,3 +107,29 @@ class MobileTranscriptTests(unittest.TestCase):
         self.assertEqual([m['id'] for m in self.history.read_thread(CHAT)['messages']],['1','4','last'])
         self.path.unlink()
         self.assertEqual(len(self.history.read_thread(CHAT)['messages']),2)
+
+    def test_malformed_private_and_unidentified_messages_do_not_surface(self):
+        self.reply(None, 'unidentified')
+        self.reply('bad-content', '', content='invalid')
+        self.reply('mixed', '', content=[{'type':'output_text','text':'visible'},{'type':'reasoning','text':'private'}])
+        self.reply('local-time', 'no timezone')
+        raw=self.path.read_text().splitlines()
+        without_zone=json.loads(raw[-1]);without_zone['timestamp']='2026-11-25T12:00:00'
+        raw[-1]=json.dumps(without_zone)
+        self.path.write_text('\n'.join(raw)+'\n')
+        self.append({'type':'event_msg','payload':{'type':'other'}})
+        self.assertEqual(len(self.history.read_thread(CHAT)['messages']),2)
+        self.path.write_text('broken session header\n')
+        self.assertEqual(len(self.history.read_thread(CHAT)['messages']),2)
+
+    def test_hidden_context_stays_hidden_even_with_photo_resolver(self):
+        from unittest.mock import Mock
+        self.history.photos=Mock()
+        self.history.photos.for_input.return_value=None
+        with closing(sqlite3.connect(self.history.history)) as db, db:
+            body={'content':[{'type':'text','text':'# AGENTS.md instructions for internal use'},
+                             {'type':'image','url':'private'}]}
+            db.execute('INSERT INTO thread_items VALUES (?,?,?,?,?,?,?,?)',(CHAT,'hidden','userMessage',json.dumps(body),5000,None,None,60))
+        messages=self.history.read_thread(CHAT)['messages']
+        self.assertNotIn('hidden',[m['id'] for m in messages])
+        self.assertFalse(any(c.args[0].get('url')=='private' for c in self.history.photos.for_input.call_args_list))

@@ -402,12 +402,13 @@ class History:
             stamp=item['created_at_ms'] or item['started_at_ms'] or item['completed_at_ms']
             message=public_item({**value,'type':kind,'id':item['item_id']},stamp,self.public_text)
             photos=[]
-            if kind=='userMessage' and self.photos and not is_scheduled_input(value):
+            content=value.get('content')
+            if kind=='userMessage' and self.photos and isinstance(content,list) and not is_scheduled_input(value):
                 # A hidden context record must not reappear as a photo-only chat message.
                 if message is None and any(isinstance(part,dict) and part.get('type')=='text' and str(part.get('text') or '').strip()
-                                           for part in (value.get('content') or [])):
+                                           for part in content):
                     continue
-                photos=[photo for part in (value.get('content') or []) if isinstance(part,dict)
+                photos=[photo for part in content if isinstance(part,dict)
                         for photo in [self.photos.for_input(part,thread_id)] if photo]
             if message is None:
                 if not photos:continue

@@ -105,7 +105,7 @@ test('Connect opens the exact chat once and waits for verified connection; an un
  const fragment=source.slice(source.indexOf("el('connect-chat').addEventListener('click'"),source.indexOf('\nif(window.CompanionUpdates)'));
  for(const fail of [false,true]){
   let click,posts=0,reads=0,clock=0;const messages=[];
-  const ctx={el:()=>({addEventListener(_,fn){click=fn;}}),readRetryAt:0,followDesktopSelection:false,document:{body:{classList:{contains:()=>false}}},selected:'chat-A',selectionVersion:4,authVersion:2,connectingChat:false,csrf:'test',selectedData:{control:{live:{connected:false}}},updateComposer(){},showCommandResult:message=>messages.push(message),
+  const ctx={el:()=>({addEventListener(_,fn){click=fn;}}),readRetryAt:0,desktopOpenRequest:null,followDesktopSelection:false,document:{body:{classList:{contains:()=>false}}},selected:'chat-A',selectionVersion:4,authVersion:2,connectingChat:false,csrf:'test',selectedData:{control:{live:{connected:false}}},updateComposer(){},showCommandResult:message=>messages.push(message),
    api:async(path,options)=>{posts++;assert.equal(path,'/api/chat/connect');assert.equal(JSON.parse(options.body).thread_id,'chat-A');if(fail)throw Error('Open acknowledgement lost');return {message:'Opening'};},
    refreshChat:async fresh=>{assert.equal(fresh,true);reads++;if(reads===2)ctx.selectedData.control.live.connected=true;return true;},
    CompanionConversation:{waitForConnection:options=>ui.waitForConnection({...options,now:()=>clock,sleep:async ms=>clock+=ms})}};
@@ -136,4 +136,22 @@ test('explicit navigation follows a confirmed connection once and ignores stale 
  ctx.selectedData.archived=false;let finish;ctx.selectChat=id=>{ctx.selected=id;ctx.selectionVersion++;return new Promise(r=>finish=r);};
  const pending=ctx.openSelectedChat('D');ctx.selectionVersion++;finish(true);await pending;assert.deepEqual(opens,['A']);
  assert.ok(source.includes("button.addEventListener('click',()=>openSelectedChat(chat.id))"));
+});
+
+test('a slow desktop open settles before the most recent selection opens; superseded selections are skipped',async()=>{
+ const source=fs.readFileSync(__dirname+'/web/app.js','utf8');
+ const fragment=source.slice(source.indexOf("el('connect-chat').addEventListener('click'"),source.indexOf('\nif(window.CompanionUpdates)'));
+ const opened=[];let finishFirst;
+ const ctx={el:()=>({addEventListener(){}}),desktopOpenRequest:null,followDesktopSelection:true,
+   document:{body:{classList:{contains:()=>false}}},selected:'A',selectionVersion:1,authVersion:1,connectingChat:false,
+   csrf:'test',readRetryAt:0,selectedData:{control:{live:{connected:true}}},updateComposer(){},showCommandResult(){},
+   api:(_url,opts)=>{const id=JSON.parse(opts.body).thread_id;opened.push(id);
+     return id==='A'?new Promise(r=>finishFirst=r):Promise.resolve({message:'Opened'});},
+   CompanionConversation:{waitForConnection:async()=>'connected'}};
+ vm.runInNewContext(fragment,ctx);
+ const a=ctx.connectChat();
+ ctx.selected='B';ctx.selectionVersion++;ctx.connectingChat=false;const b=ctx.connectChat();
+ ctx.selected='C';ctx.selectionVersion++;ctx.connectingChat=false;const c=ctx.connectChat();
+ assert.deepEqual(opened,['A']);finishFirst({message:'Opened'});await Promise.all([a,b,c]);
+ assert.deepEqual(opened,['A','C']);assert.equal(ctx.desktopOpenRequest,null);assert.equal(ctx.connectingChat,false);
 });
