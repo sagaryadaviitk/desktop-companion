@@ -451,6 +451,34 @@ class HttpTests(unittest.TestCase):
             execution['status']='idle';execution['turn_id']=None
             self.assertEqual(self.request(path,headers={'If-None-Match':headers['ETag']})[0],200)
 
+    def test_selected_owner_updates_latest_page_and_etag_without_persisting_the_turn(self):
+        from contextlib import nullcontext
+        from desktop_runtime import DesktopClient, DesktopRuntime
+        from unittest.mock import Mock
+        runtime=DesktopRuntime(self.server.history.home,self.server.history.read_thread)
+        client=Mock(spec=DesktopClient)
+        client.execution_state=lambda *args,**kwargs: DesktopClient.execution_state(client,*args,**kwargs)
+        client.call.side_effect=lambda method,*a,**kw: (
+            {'handledByClientId':'fixture-owner'} if method=='thread-owner-discovery'
+            else {'result':{'settings':{'resumeState':'resumed'}}})
+        items=[]
+        client.conversation_state.return_value={'id':CHAT,'threadRuntimeStatus':{'type':'active'},
+            'turnHistory':{'kind':'canonical','history':{'entitiesByKey':{'new':{
+                'turnId':'new','turnStartedAtMs':5000,'status':'inProgress','items':items}}}}}
+        url='/api/chat?id='+CHAT
+        with patch.object(self.server,'runtime',runtime),patch.object(runtime,'client',return_value=nullcontext(client)),patch.object(self.server.bridge,'describe',side_effect=lambda _: {'available':True}):
+            _,headers,_=self.request(url)
+            items.extend([{'id':'secret','type':'reasoning','text':'PRIVATE-TRACE'},
+                          {'id':'newest','type':'agentMessage','text':'New live reply'}])
+            status,updated,body=self.request(url,headers={'If-None-Match':headers['ETag']})
+            self.assertEqual(status,200)
+            self.assertNotIn(b'PRIVATE-TRACE',body)
+            msg=json.loads(body)['messages'][-1]
+            self.assertEqual((msg['id'],msg['text'],msg['unindexed']),('newest','New live reply',True))
+            self.assertEqual(self.request(url,headers={'If-None-Match':updated['ETag']})[0],304)
+            self.assertNotIn(b'New live reply',self.request(url+'&before=4')[2])
+            self.assertNotIn('newest',[m['id'] for m in self.server.history.read_thread(CHAT)['messages']])
+
     def test_loaded_owner_replaces_disconnected_etag_even_when_activity_is_unavailable(self):
         live={'connected':False,'model_selection':False}
         runtime=SimpleNamespace(capabilities=lambda _:dict(live))

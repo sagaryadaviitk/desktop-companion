@@ -88,14 +88,14 @@ class QuestionTests(unittest.TestCase):
 
 class AnswerHttpTests(QuestionTests):
     def setUp(self):
-        super().setUp();self.calls=[];self.fail=False;self.available=True
+        super().setUp();self.calls=[];self.fail_delivery=False;self.available=True
         outer=self
         class FakeBridge:
             def availability(self):return {'available':outer.available,'reason':'Read only'}
             def describe(self,_):return self.availability()
             def send(self,thread,message):
                 outer.calls.append((thread,message))
-                if outer.fail:raise ControlError('No acknowledgement',uncertain=True)
+                if outer.fail_delivery:raise ControlError('No acknowledgement',uncertain=True)
                 return {'state':'queued','queue_item_id':'fake-queue'}
         self.server=CompanionServer(('127.0.0.1',0),self.history,FakeBridge(),CommandJournal(self.root/'journal.sqlite'))
         self.worker=threading.Thread(target=self.server.serve_forever,daemon=True);self.worker.start()
@@ -143,7 +143,7 @@ class AnswerHttpTests(QuestionTests):
         self.assertEqual(value['questions'],[])
 
     def test_lost_ack_is_never_resent(self):
-        self.fail=True;payload=self.payload();self.assertEqual(self.post(payload)[1]['state'],'unknown');self.assertEqual(self.post(payload)[1]['state'],'unknown');self.assertEqual(len(self.calls),1)
+        self.fail_delivery=True;payload=self.payload();self.assertEqual(self.post(payload)[1]['state'],'unknown');self.assertEqual(self.post(payload)[1]['state'],'unknown');self.assertEqual(len(self.calls),1)
 
     def test_read_only_and_archived_chats_cannot_answer(self):
         payload=self.payload();self.available=False;self.assertEqual(self.post(payload)[0],409);self.available=True
@@ -166,6 +166,7 @@ class AnswerHttpTests(QuestionTests):
             db.execute('INSERT INTO queued_items VALUES (?,?,?,?,?)',('desktop-reply',CHAT,json.dumps({'UserInput':{'content':[{'type':'text','text':answer_envelope(question,'A')}]}}),2000,1))
         self.assertEqual(self.questions()[0]['delivery'],'queued')
         self.assertEqual(self.questions()[0]['queued_answer'],'A')
+        self.assertEqual(self.get('/api/chats')[2]['chats'][0]['question_count'], 0)
         self.assertEqual(self.post(self.payload())[0],409);self.assertEqual(self.calls,[])
 
     def test_queue_disappearance_alone_does_not_mark_a_reply_received(self):
@@ -186,6 +187,56 @@ class AnswerHttpTests(QuestionTests):
                 outer.live_calls.append((thread,envelope))
                 return {'state':'sent','turn_id':'next-turn'}
         self.live_calls=[];self.server.runtime=Live()
+
+    def get(self, path, etag=None):
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=3)
+        connection.request('GET', path, headers={'If-None-Match': etag} if etag else {})
+        response = connection.getresponse()
+        data = response.read()
+        connection.close()
+        return response.status, response.getheader('ETag'), json.loads(data) if data else None
+
+    def test_acknowledged_reply_clears_exact_card_and_catalog_across_restart(self):
+        for state, index in [('steered', 0), ('sent', 1)]:
+            self.live_runtime(state)
+            question = self.questions()[index]
+            _, chat_tag, _ = self.get('/api/chat?id=' + CHAT)
+            _, list_tag, _ = self.get('/api/chats')
+            payload = {**self.payload(), 'question_id': question['id'], 'revision': question['revision']}
+            self.assertEqual(self.post(payload)[1]['state'], state)
+            self.server.journal = CommandJournal(self.root / 'journal.sqlite')
+            status, _, chat = self.get('/api/chat?id=' + CHAT, chat_tag)
+            self.assertEqual(status, 200)
+            self.assertEqual([q['id'] for q in chat['questions']], [q['id'] for q in self.questions()[index+1:]])
+            status, _, catalog = self.get('/api/chats', list_tag)
+            self.assertEqual(status, 200)
+            self.assertEqual(catalog['chats'][0]['question_count'], 1-index)
+            self.assertEqual(self.post(payload)[1]['state'], state)
+            self.assertEqual(len(self.live_calls), 1)
+
+    def test_updated_question_revision_is_actionable_after_old_receipt(self):
+        self.live_runtime()
+        self.assertEqual(self.post(self.payload())[1]['state'], 'steered')
+        with sqlite3.connect(self.root/'thread_history_1.sqlite') as db:
+            updated = {'delivery':'async','questions':[{'title':'Revised question?'}]}
+            db.execute("UPDATE thread_items SET item_json=? WHERE item_id='call-question'", (json.dumps(updated),))
+        self.assertEqual(self.get('/api/chat?id='+CHAT)[2]['questions'][0]['delivery'], 'unanswered')
+        self.assertEqual(self.get('/api/chats')[2]['chats'][0]['question_count'], 1)
+
+    def test_queued_reply_promotion_retires_only_matching_question_after_ack(self):
+        first, second = self.questions()
+        self.assertEqual(self.post(self.payload())[1]['state'], 'queued')
+        self.server.journal.execute('promote-other', {}, lambda: {'state':'steered'},
+                                    reconcile_queue_id='other-queue')
+        self.server.journal.execute('promote-uncertain', {}, lambda: {'state':'unknown'},
+                                    reconcile_queue_id='fake-queue')
+        questions = self.get('/api/chat?id='+CHAT)[2]['questions']
+        self.assertEqual([(q['id'], q['delivery']) for q in questions],
+                         [(first['id'], 'queued'), (second['id'], 'unanswered')])
+        self.assertEqual(self.get('/api/chats')[2]['chats'][0]['question_count'], 1)
+        self.server.journal.execute('confirmed-promotion', {}, lambda: {'state':'steered'},
+                                    reconcile_queue_id='fake-queue')
+        self.assertEqual(self.get('/api/chat?id='+CHAT)[2]['questions'], [second])
 
     def test_active_question_answer_is_steered_once_without_queueing(self):
         self.live_runtime();payload=self.payload()

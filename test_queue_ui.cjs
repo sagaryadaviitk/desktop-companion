@@ -49,12 +49,16 @@ test('uncertain submission keeps its draft and never retries without another use
 });
 function questionFixture(count=1,fail=false){
  const doc=document();doc.getElementById('questions-dialog').open=true;const questions=Array.from({length:count},(_,i)=>({id:'q'+i,revision:'r'+i,title:'Question '+i,options:[],delivery:'unanswered'}));
- const context={document:doc,el:id=>doc.getElementById(id),note:(tag,text,cls)=>{const n=new Element(tag);n.textContent=text;n.className=cls;return n;},selected:'chat',selectedData:{questions,control:{available:true,live:{}}},renderApprovals(){},connected:true,authVersion:0,csrf:'test',questionSignature:'',questionDrafts:new Map(),questionBusy:new Set(),questionErrors:new Map(),queueSteering:new Set(),queueUI:{reveal(){}},showCommandResult(){},refreshChat:async()=>{},api:async()=>{if(fail)throw Error('Unconfirmed');return {state:'steered',message:'Accepted'};}};
+ const context={document:doc,el:id=>doc.getElementById(id),note:(tag,text,cls)=>{const n=new Element(tag);n.textContent=text;n.className=cls;return n;},selected:'chat',selectedData:{questions,control:{available:true,live:{}}},renderApprovals(){},connected:true,authVersion:0,csrf:'test',chatRequestVersion:0,questionSignature:'',questionDrafts:new Map(),questionBusy:new Set(),questionErrors:new Map(),queueSteering:new Set(),queueUI:{reveal(){}},showCommandResult(){},refreshChat:async()=>{},api:async()=>{if(fail)throw Error('Unconfirmed');return {state:'steered',message:'Accepted'};}};
  vm.runInNewContext(app.slice(app.indexOf('function renderQuestions(){'),app.indexOf("el('questions-banner').addEventListener")),context);context.renderQuestions();return {context,doc};
 }
 test('accepted final answers close the question panel; remaining questions and errors keep it open',async()=>{
  for(const [count,fail,open] of [[1,false,false],[2,false,true],[1,true,true]]){
   const f=questionFixture(count,fail),form=walk(f.doc.getElementById('question-cards')).find(n=>n.tag==='form'),textarea=form.children.find(n=>n.tag==='textarea');textarea.value='My answer';await textarea.emit('input');await form.emit('submit');assert.equal(f.doc.getElementById('questions-dialog').open,open);
+  assert.equal(f.context.selectedData.questions.length,fail?count:count-1);
+  assert.equal(f.doc.getElementById('questions-banner').hidden,!open);
+  assert.equal(f.context.chatRequestVersion,fail?0:1);
+  if(count===2)assert.equal(f.context.selectedData.questions[0].id,'q1');
  }
  const f=questionFixture();f.context.selectedData.questions=[];f.context.questionSignature='';f.context.renderQuestions();assert.equal(f.doc.getElementById('questions-dialog').open,false);
 });
@@ -81,4 +85,15 @@ test('a read-only viewer never enables restored queue mutations',async()=>{
  const f=queueFixture();f.data.control.available=false;const rendered=f.ui.render(f.data);
  for(const button of walk(rendered).filter(n=>n.dataset.action)){assert.equal(button.disabled,true);await button.emit('click');}
  assert.equal(f.calls.length,0);assert.equal(f.doc.getElementById('queue-dialog').open,false);
+});
+
+test('badge counts only exact unanswered IDs present in the desktop observation',()=>{
+  const {context}=questionFixture();
+  vm.runInNewContext(app.slice(app.indexOf('function questionCount(chat)'),app.indexOf('function approvalCount(chat)')),context);
+  const chat={id:'chat',question_count:1,unanswered_question_ids:['two']};
+  context.currentStatus={execution:{chat:{question_count:1,async_question_ids:['one']}}};
+  assert.equal(context.questionCount(chat),0);
+  context.currentStatus.execution.chat.async_question_ids.push('two');
+  assert.equal(context.questionCount(chat),1);
+  context.connected=false;assert.equal(context.questionCount(chat),1);
 });

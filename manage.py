@@ -18,7 +18,7 @@ from configuration import load,save,ROOT,FILENAME
 
 MODULES=('access.py','approvals.py','build_app.py','companion.py','computer_use.py','configuration.py',
          'control.py','desktop_runtime.py','inbox.py','local_assistant.py','local_forks.py','local_settings.py','local_smoke.py','local_tools.py','manage.py','media.py','new_chat.py','photos.py',
-         'power.py','promotions.py','questions.py','read_cache.py','remote_access.py','runtime.py','service.py','system_status.py')
+         'power.py','promotions.py','questions.py','read_cache.py','remote_access.py','runtime.py','service.py','system_status.py','transcript.py')
 
 # Columns read by History and NewChat. Keep runtime-supported fallbacks optional:
 # threads.reasoning_effort, receipts.last_published_turn, queue.updated_at_ms.
@@ -115,7 +115,7 @@ def doctor(root=ROOT,*,check_native=True):
 
 def bundle(output,root=ROOT):
     root=Path(root).resolve();output=Path(output).resolve()
-    files=[root/name for name in MODULES]+[root/name for name in ('.gitignore','config.example.json','README.md','SETUP.md','COMPATIBILITY.md','LOCAL_ASSISTANT.md','local-settings.example.json')]
+    files=[root/name for name in MODULES]+[root/name for name in ('.gitignore','config.example.json','README.md','SETUP.md','CODEX-INSTALL.md','COMPATIBILITY.md','LOCAL_ASSISTANT.md','local-settings.example.json')]
     for name in ('.gitattributes','AGENTS.md','CONTRIBUTING.md','.github/workflows/checks.yml'):
         path=root/name
         if path.exists() or path.is_symlink():files.append(path)

@@ -27,7 +27,8 @@ let questionSignature='';
 const queueSteering=new Set();
 const photoDrafts=new Map(),photoUploads=new Map();
 let resultTimer=null;
-let newChatFlow=null,healthFlow=null,queueUI=null,connectingChat=false,renamingChat=false;
+let desktopOpenRequest=null;
+let newChatFlow=null,healthFlow=null,queueUI=null,connectingChat=false,followDesktopSelection=false,renamingChat=false;
 function showCommandResult(message,temporary=false){clearTimeout(resultTimer);el("command-result").textContent=message;if(temporary)resultTimer=setTimeout(()=>{if(el("command-result").textContent===message)el("command-result").textContent="";},7000);}
 const mobile=()=>window.matchMedia("(max-width:760px)").matches;
 const recordedLabels={inProgress:"Working now",completed:"Completed",interrupted:"Interrupted",failed:"Failed"};
@@ -62,6 +63,7 @@ async function api(path, options = {}) {
 
 function lockScreen(){
   localEntry.reset();
+  followDesktopSelection=false;connectingChat=false;
   authVersion++;selectionVersion++;deliveryReceipts.reset();chatRefreshPromise=null;connected=false;currentStatus=null;chatSignature="";pendingSignature="";commandAttempts.clear();
   inboxView="recent";homeSignature="";deliveryMode="queue";readAcknowledgements.clear();modelAttempts.clear();
   displayedRevision=null;readRequests.clear();refreshPromise=null;cancelAnimationFrame(readFrame);el('pull-refresh').hidden=true;
@@ -185,7 +187,7 @@ function chatCard(chat,home=false){
   if(chat.unread){const newTag=document.createElement('span');newTag.className='new-tag';newTag.textContent='Unread';tags.append(newTag);}
   if(approvalCount(chat)){const approval=document.createElement('span');approval.className='approval-tag';approval.textContent=`${approvalCount(chat)} live request${approvalCount(chat)===1?'':'s'}`;tags.prepend(approval);}
   if(questionCount(chat)){const reply=document.createElement('span');reply.className='reply-tag';reply.textContent=`${questionCount(chat)} question${questionCount(chat)===1?'':'s'}`;tags.prepend(reply);}
-  button.append(headingRow,preview,meta,tags);button.addEventListener('click',()=>selectChat(chat.id));return button;
+  button.append(headingRow,preview,meta,tags);button.addEventListener('click',()=>openSelectedChat(chat.id));return button;
 }
 
 function chooseInbox(view){inboxView=view;el('chat-filter').value=view==='working'?'working':'active';goHome();renderChats();renderHome();}
@@ -292,7 +294,16 @@ else el('add-photo').addEventListener('click',()=>el('photo-input').click());
 approvalUI=CompanionApprovals.create({dialog:el('approvals-dialog'),banner:el('approvals-banner'),panel:el('approval-cards'),close:el('approvals-close'),summary:el('approvals-summary'),
   submit:payload=>api('/api/approvals/respond',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify(payload)}),
   changed:result=>{if(result)showCommandResult(result.message,true);refreshChat(true);}});
-function questionCount(chat){const value=connected?currentStatus?.execution?.[chat.id]?.question_count:null;return Number.isInteger(value)?value:chat.question_count||0;}
+function questionCount(chat){
+  const live = connected ? currentStatus?.execution?.[chat.id] : null;
+  if(Array.isArray(chat.unanswered_question_ids) && Array.isArray(live?.async_question_ids)){
+    const pending = new Set(live.async_question_ids);
+    return chat.unanswered_question_ids.filter(id => pending.has(id)).length;
+  }
+  return Number.isInteger(live?.question_count)
+    ? Math.min(live.question_count, chat.question_count ?? live.question_count)
+    : chat.question_count || 0;
+}
 function approvalCount(chat){return connected?currentStatus?.execution?.[chat.id]?.approval_count||0:0;}
 function renderApprovals(){approvalUI.update({thread:selected,visible:Boolean(selected&&!document.body.classList.contains('home-open')),connected:Boolean(connected&&selectedData?.control?.live?.connected&&!selectedData?.archived),requests:selectedData?.control?.live?.execution?.approvals||[]});}
 async function renderPhotoStorage(){
@@ -326,6 +337,8 @@ function renderQuestions(){
   banner.hidden=!selected||!questions.length||document.body.classList.contains('home-open');
   const unanswered=questions.filter(q=>q.delivery==='unanswered').length,queued=questions.filter(q=>q.delivery==='queued').length;
   el('questions-summary').textContent=unanswered?`${unanswered} question${unanswered===1?'':'s'} for you`:queued?`${queued} repl${queued===1?'y':'ies'} queued`:'Reply delivery status';
+  const actionLabel=el('questions-action');
+  if(actionLabel)actionLabel.textContent=unanswered?'View & reply →':'View status →';
   banner.dataset.state=questions.some(q=>q.delivery==='unknown')?'warning':'normal';
   if(!el('questions-dialog').open)return;
   const available=Boolean(connected&&selectedData?.control?.available&&!selectedData.archived);
@@ -351,7 +364,7 @@ function renderQuestions(){
       const radio=document.createElement('input');radio.type='radio';radio.name='question-'+index;radio.value=option;radio.disabled=submitted||busy;radio.checked=textarea.value===option;
       radio.addEventListener('change',()=>{textarea.value=option;questionDrafts.set(key,option);update();});label.append(radio,note('span',option));options.append(label);
     }
-    if(question.options.length)form.append(options);
+    if(question.options.length && !submitted)form.append(options);
     const label=note('label',question.options.length?'Your answer':'Reply');label.htmlFor=textarea.id;
     const submit=note('button',busy?'Sending…':submitted?'Reply submitted':'Send reply','primary-button');submit.type='submit';
     const feedback=note('p',questionErrors.get(key)||(question.delivery==='queued'?(selectedData.control.live?.queue_steer?'Reply queued. Use Steer reply now to deliver it to the active turn.':'Reply queued until this turn finishes. Manage this queued reply on your Mac.'):question.delivery==='unknown'?'Delivery is unconfirmed. Check the desktop queue and conversation before trying again.':question.delivery==='steered'||question.delivery==='sent'?'Reply delivered to the desktop chat.':submitted?'A reply was already attempted. Check the conversation on your Mac.':!available?'Replies are unavailable until this chat reconnects. Your draft is kept.':''),'question-feedback');feedback.setAttribute('role','status');
@@ -363,11 +376,27 @@ function renderQuestions(){
       try{
         const result=await api('/api/questions/answer',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target,question_id:question.id,revision:question.revision,answer})});
         if(version!==authVersion)return;
-        if(selected===target){const current=selectedData?.questions?.find(q=>q.id===question.id&&q.revision===question.revision);if(current)current.delivery=result.state;questionDrafts.delete(key);showCommandResult(result.message,true);if(selectedData?.questions?.every(q=>['queued','steered','sent'].includes(q.delivery)))el('questions-dialog').close();if(result.state==='queued')queueUI.reveal();}
+        if(selected===target && selectedData){
+          const matches=q=>q.id===question.id && q.revision===question.revision;
+          if(result.state==='sent' || result.state==='steered'){
+            selectedData.questions=selectedData.questions.filter(q=>!matches(q));
+          }else{
+            const current=selectedData.questions.find(matches);
+            if(current)current.delivery=result.state;
+          }
+          questionDrafts.delete(key);
+          // Fence any pre-submit poll before it can restore the old card.
+          chatRequestVersion++;
+          renderQuestions();
+          if(selectedData.questions.every(q=>q.delivery==='queued'))el('questions-dialog').close();
+          showCommandResult(result.message,true);
+          if(result.state==='queued')queueUI.reveal();
+        }
       }catch(error){if(version===authVersion)questionErrors.set(key,error.message+' Your draft is kept. An unchanged retry will not send twice.');}
-      finally{questionBusy.delete(key);if(version===authVersion&&selected===target){await refreshChat();renderQuestions();}}
+      finally{questionBusy.delete(key);if(version===authVersion&&selected===target){await refreshChat(true);renderQuestions();}}
     });
-    form.append(label,textarea,submit,feedback);
+    if(!submitted)form.append(label,textarea,submit);
+    form.append(feedback);
     if(question.delivery==='queued'&&question.queued_message&&selectedData.control.live?.queue_steer){const instruction=question.queued_message,steer=note('button',queueSteering.has(instruction.id)?'Steering…':'Steer reply now','quiet-button');steer.type='button';steer.disabled=!available||!instruction.can_steer||queueSteering.has(instruction.id);steer.addEventListener('click',async()=>{steer.disabled=true;steer.textContent='Steering…';try{await steerQueued(instruction,selectedData);}catch(error){questionErrors.set(key,error.message);renderQuestions();}});form.append(steer);}
     card.append(form);panel.append(card);update();
   }
@@ -494,12 +523,21 @@ function renderPanels(data){
   const list=document.createElement("dl");for(const [label,value]of fields)list.append(text("dt",label),text("dd",value));details.append(list);
   details.append(text("p","Older chats are grouped using saved project folders when no project ID was recorded. Projects sharing the same folder can contain the same chat.","panel-help"));
   details.append(text("h4","Available here"),text("p","Projects and folders, new local chats, active and archived chats, subagent chats, conversation history, recorded activity, saved patches, and photo messages. Connected chats support direct Send, Steer, and model selection.","panel-help"));
-  details.append(text('h4','Questions for you'),text('p','Assistant questions include the same saved choices and a free-text answer. Replies use the desktop question format and go directly to a connected active chat. When live controls are disconnected, a reply is explicitly queued. A question clears after its reply is recorded. Live approvals have a separate Review panel. Secure macOS dialogs and sign-ins require your Mac.','panel-help'));
+  details.append(text('h4','Questions for you'),text('p','Assistant questions include the same saved choices and a free-text answer. Replies use the desktop question format and go directly to a connected active chat. When live controls are disconnected, a reply is explicitly queued. An acknowledged answer clears its question. Queued and unconfirmed replies show delivery status. Live approvals have a separate Review panel. Secure macOS dialogs and sign-ins require your Mac.','panel-help'));
   details.append(text("h4","Your drafts and privacy"),text("p","Drafts stay with each chat while this page is open, including during a connection outage. Reloading or signing out clears them. Conversation text is read from your Mac; tool output and internal reasoning stay private. Detected credentials are hidden.","panel-help"));
   details.append(text('h4','Live controls'),text('p',data.control?.live?.model_selection?'The shared desktop connection can change this chat’s model for subsequent turns. Steer is available while an accepted active turn is running.':data.control?.live?.reason||'The shared desktop control connection is unavailable.','panel-help'));
   details.append(text('h4','Desktop apps while locked'),text('p',currentStatus?.computer_use?.state==='blocked'?'The last native Chrome test could not unlock the locked Mac, even though Locked Use was installed. Background work and direct message delivery are separate. Tap Mac battery above for the check details.':'Tap Mac battery above to see the last locked-screen desktop-app check.','panel-help'));
   details.append(text("h4","Continue in the desktop app"),text("p","Live stop, runtime approval requests, non-photo attachments, worktree management, and cloud or other-host chats still require the desktop app.","panel-help"));
   for(const [id,position]of positions)el(id).scrollTop=position;
+}
+
+async function openSelectedChat(id){
+  const opening=selected!==id||document.body.classList.contains('home-open');
+  const load=selectChat(id),version=selectionVersion,session=authVersion;
+  if(await load!==true||!opening||!followDesktopSelection||version!==selectionVersion||session!==authVersion)return;
+  if(selected!==id||document.body.classList.contains('home-open')||!connected||!selectedData?.control?.available||selectedData.archived)return;
+  const live=selectedData.control.live;
+  if(!live?.connected&&!live?.model_selection)await connectChat();
 }
 
 async function selectChat(id,navigate=true) {
@@ -513,7 +551,7 @@ async function selectChat(id,navigate=true) {
   }
   document.body.classList.remove('home-open');el('home-screen').hidden=true;
   if(id===selected&&selectedData){document.activeElement?.blur();document.body.classList.add("chat-open");if(reopening){conversationNeedsScroll=true;conversationScroll.open();jumpLatest();}renderQuestions();updateComposer();return refreshChat();}
-  document.activeElement?.blur();selectionVersion++;
+  document.activeElement?.blur();selectionVersion++;connectingChat=false;
   selected=id;conversationRevision=''; conversationScroll.open();selectedData=null;displayedRevision=null;deliveryMode='queue'; lastSignature="";panelSignature="";pendingSignature="";conversationNeedsScroll=true; messageMap.clear();nextBefore=null;loadedEarlier=false;loadingEarlier=false;el("command-result").textContent="";
   el("instruction").value=drafts.get(id)||"";
   el("instruction").disabled=true; el("send").disabled=true;
@@ -650,6 +688,8 @@ async function readCurrentChat() {
       for(const recovery of data.queue_recovery||[]){const card=document.createElement('details');card.className='queue-recovery';const title=document.createElement('summary');title.textContent=recovery.title||'Delivery needs review';const note=document.createElement('p');note.textContent=recovery.message;const text=document.createElement('p');text.className='pending-text';text.textContent=recovery.text;const actions=document.createElement('div');actions.className='recovery-actions';const button=document.createElement('button');button.type='button';button.className='quiet-button';button.textContent='Copy to draft';button.addEventListener('click',()=>{if(((drafts.get(data.id)||'').trim()||(photoDrafts.get(data.id)||[]).length)&&!window.confirm('Replace the current draft and photos with this saved queue version?'))return;drafts.set(data.id,recovery.text);photoDrafts.set(data.id,recovery.photos||[]);el('instruction').value=recovery.text;showCommandResult('Review the conversation before sending this text again.');updateComposer();});const dismiss=document.createElement('button');dismiss.type='button';dismiss.className='quiet-button';dismiss.textContent='Dismiss';dismiss.addEventListener('click',async()=>{dismiss.disabled=true;try{await api('/api/queue/recovery/dismiss',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:data.id,queue_id:recovery.id})});pendingSignature='';await refreshChat();}catch(error){dismiss.disabled=false;showCommandResult(error.message);}});actions.append(button,dismiss);card.append(title,note,text,actions);if(recovery.confirmed){if(!savedVersions){savedVersions=document.createElement('details');savedVersions.className='queue-recovery queue-versions';const heading=document.createElement('summary');heading.textContent='Previous queue versions';savedVersions.append(heading);el('pending').append(savedVersions);}savedVersions.append(card);}else el('pending').append(card);}
 
     }
+    // Provisional messages are replaced by each fresh snapshot or their indexed copy.
+    for(const [id,message] of messageMap)if(message.unindexed)messageMap.delete(id);
     for(const message of data.messages)messageMap.set(message.id,message);
     if(!loadedEarlier)nextBefore=data.next_before??null;
     renderMessages();
@@ -828,25 +868,36 @@ el("composer").addEventListener("submit",async event=>{
   }catch(error){attempt.retrying=true;const rejected=error.result?.state==='rejected'||error.status>=400&&error.status<500&&error.result?.state!=='unknown'&&error.status!==429;if(rejected)commandAttempts.delete(target);deliveryReceipts.remove(attempt.id);if(version===authVersion&&selected===target)el("command-result").textContent=rejected?`${error.message} Your draft is kept. Refresh and send again when ready.`:`${error.message} Your draft is kept. Check ${mode==='queue'?'the queued follow-ups':'the desktop conversation'} before retrying; an unchanged retry uses the same request ID.`;}
   finally{sending=false;if(version===authVersion){renderMessages();updateComposer();await refreshChat(true);}}
 });
-el('connect-chat').addEventListener('click',async()=>{
+el('connect-chat').addEventListener('click',()=>connectChat());
+async function connectChat(){
   if(connectingChat||!selected)return;
   const target=selected,version=authVersion,selection=selectionVersion;
-  const isCurrent=()=>target===selected&&version===authVersion&&selection===selectionVersion;
+  const isCurrent=()=>target===selected&&version===authVersion&&selection===selectionVersion&&!document.body.classList.contains('home-open');
   connectingChat=true;updateComposer();
   try{
     // Opening is requested exactly once. Its acknowledgement is not proof that
     // the desktop has finished loading the chat; only fresh reads confirm that.
-    const result=await api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});
+    // Serialize desktop window opens across rapid selections. Only the currently
+    // selected chat may start a request after an earlier open has settled.
+    if(desktopOpenRequest)await desktopOpenRequest.catch(()=>{});
+    if(!isCurrent())return;
+    const opening=api('/api/chat/connect',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target})});
+    desktopOpenRequest=opening;
+    let result;
+    try{result=await opening;}finally{if(desktopOpenRequest===opening)desktopOpenRequest=null;}
     if(!isCurrent())return;
     showCommandResult(result.message);
     const outcome=await CompanionConversation.waitForConnection({read:()=>refreshChat(true),isCurrent,retryAfter:()=>Math.max(0,readRetryAt-Date.now()),
       isConnected:()=>selectedData?.control?.live?.connected===true||selectedData?.control?.live?.model_selection===true});
     if(!isCurrent())return;
-    if(outcome==='connected')showCommandResult('Connected to desktop.',true);
+    if(outcome==='connected'){
+      followDesktopSelection=true;
+      showCommandResult('Connected to desktop.',true);
+    }
     else if(outcome==='timeout')showCommandResult('The chat was opened, but its live connection could not be confirmed. Check the chat on your Mac, then try Connect again. Your draft is kept.');
   }catch(error){if(isCurrent())showCommandResult(error.message);}
-  finally{connectingChat=false;updateComposer();}
-});
+  finally{if(version===authVersion&&selection===selectionVersion){connectingChat=false;updateComposer();}}
+}
 if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>photoStorageBusy||approvalUI?.busy()||sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else if(document.body.classList.contains('home-open')||!selected)showNotice(message);else showCommandResult(message);}});
 el('app-reload').addEventListener('click',()=>updater?.reload());
 window.addEventListener('pageshow',event=>{if(event.persisted&&!document.body.classList.contains('signed-out'))refreshAll(true);});
