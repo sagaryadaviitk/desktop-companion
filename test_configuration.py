@@ -36,6 +36,7 @@ class ConfigurationTests(unittest.TestCase):
                 names=z.namelist();self.assertEqual(count,len(names))
                 self.assertIn('desktop_companion/config.example.json',names)
                 self.assertIn('desktop_companion/COMPATIBILITY.md',names)
+                self.assertIn('desktop_companion/CODEX-INSTALL.md',names)
                 self.assertIn('desktop_companion/web/attachments.js',names)
                 for name in ['new_chat.js','appearance.js','status.js','theme.css']:self.assertIn('desktop_companion/web/'+name,names)
                 self.assertIn('desktop_companion/system_status.py',names)

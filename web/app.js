@@ -292,7 +292,16 @@ else el('add-photo').addEventListener('click',()=>el('photo-input').click());
 approvalUI=CompanionApprovals.create({dialog:el('approvals-dialog'),banner:el('approvals-banner'),panel:el('approval-cards'),close:el('approvals-close'),summary:el('approvals-summary'),
   submit:payload=>api('/api/approvals/respond',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify(payload)}),
   changed:result=>{if(result)showCommandResult(result.message,true);refreshChat(true);}});
-function questionCount(chat){const value=connected?currentStatus?.execution?.[chat.id]?.question_count:null;return Number.isInteger(value)?value:chat.question_count||0;}
+function questionCount(chat){
+  const live = connected ? currentStatus?.execution?.[chat.id] : null;
+  if(Array.isArray(chat.unanswered_question_ids) && Array.isArray(live?.async_question_ids)){
+    const pending = new Set(live.async_question_ids);
+    return chat.unanswered_question_ids.filter(id => pending.has(id)).length;
+  }
+  return Number.isInteger(live?.question_count)
+    ? Math.min(live.question_count, chat.question_count ?? live.question_count)
+    : chat.question_count || 0;
+}
 function approvalCount(chat){return connected?currentStatus?.execution?.[chat.id]?.approval_count||0:0;}
 function renderApprovals(){approvalUI.update({thread:selected,visible:Boolean(selected&&!document.body.classList.contains('home-open')),connected:Boolean(connected&&selectedData?.control?.live?.connected&&!selectedData?.archived),requests:selectedData?.control?.live?.execution?.approvals||[]});}
 async function renderPhotoStorage(){
@@ -326,6 +335,7 @@ function renderQuestions(){
   banner.hidden=!selected||!questions.length||document.body.classList.contains('home-open');
   const unanswered=questions.filter(q=>q.delivery==='unanswered').length,queued=questions.filter(q=>q.delivery==='queued').length;
   el('questions-summary').textContent=unanswered?`${unanswered} question${unanswered===1?'':'s'} for you`:queued?`${queued} repl${queued===1?'y':'ies'} queued`:'Reply delivery status';
+  banner.querySelector('strong').textContent=unanswered?'View & reply →':'View status →';
   banner.dataset.state=questions.some(q=>q.delivery==='unknown')?'warning':'normal';
   if(!el('questions-dialog').open)return;
   const available=Boolean(connected&&selectedData?.control?.available&&!selectedData.archived);
@@ -351,7 +361,7 @@ function renderQuestions(){
       const radio=document.createElement('input');radio.type='radio';radio.name='question-'+index;radio.value=option;radio.disabled=submitted||busy;radio.checked=textarea.value===option;
       radio.addEventListener('change',()=>{textarea.value=option;questionDrafts.set(key,option);update();});label.append(radio,note('span',option));options.append(label);
     }
-    if(question.options.length)form.append(options);
+    if(question.options.length && !submitted)form.append(options);
     const label=note('label',question.options.length?'Your answer':'Reply');label.htmlFor=textarea.id;
     const submit=note('button',busy?'Sending…':submitted?'Reply submitted':'Send reply','primary-button');submit.type='submit';
     const feedback=note('p',questionErrors.get(key)||(question.delivery==='queued'?(selectedData.control.live?.queue_steer?'Reply queued. Use Steer reply now to deliver it to the active turn.':'Reply queued until this turn finishes. Manage this queued reply on your Mac.'):question.delivery==='unknown'?'Delivery is unconfirmed. Check the desktop queue and conversation before trying again.':question.delivery==='steered'||question.delivery==='sent'?'Reply delivered to the desktop chat.':submitted?'A reply was already attempted. Check the conversation on your Mac.':!available?'Replies are unavailable until this chat reconnects. Your draft is kept.':''),'question-feedback');feedback.setAttribute('role','status');
@@ -363,11 +373,27 @@ function renderQuestions(){
       try{
         const result=await api('/api/questions/answer',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:target,question_id:question.id,revision:question.revision,answer})});
         if(version!==authVersion)return;
-        if(selected===target){const current=selectedData?.questions?.find(q=>q.id===question.id&&q.revision===question.revision);if(current)current.delivery=result.state;questionDrafts.delete(key);showCommandResult(result.message,true);if(selectedData?.questions?.every(q=>['queued','steered','sent'].includes(q.delivery)))el('questions-dialog').close();if(result.state==='queued')queueUI.reveal();}
+        if(selected===target && selectedData){
+          const matches=q=>q.id===question.id && q.revision===question.revision;
+          if(result.state==='sent' || result.state==='steered'){
+            selectedData.questions=selectedData.questions.filter(q=>!matches(q));
+          }else{
+            const current=selectedData.questions.find(matches);
+            if(current)current.delivery=result.state;
+          }
+          questionDrafts.delete(key);
+          // Fence any pre-submit poll before it can restore the old card.
+          chatRequestVersion++;
+          renderQuestions();
+          if(selectedData.questions.every(q=>q.delivery==='queued'))el('questions-dialog').close();
+          showCommandResult(result.message,true);
+          if(result.state==='queued')queueUI.reveal();
+        }
       }catch(error){if(version===authVersion)questionErrors.set(key,error.message+' Your draft is kept. An unchanged retry will not send twice.');}
-      finally{questionBusy.delete(key);if(version===authVersion&&selected===target){await refreshChat();renderQuestions();}}
+      finally{questionBusy.delete(key);if(version===authVersion&&selected===target){await refreshChat(true);renderQuestions();}}
     });
-    form.append(label,textarea,submit,feedback);
+    if(!submitted)form.append(label,textarea,submit);
+    form.append(feedback);
     if(question.delivery==='queued'&&question.queued_message&&selectedData.control.live?.queue_steer){const instruction=question.queued_message,steer=note('button',queueSteering.has(instruction.id)?'Steering…':'Steer reply now','quiet-button');steer.type='button';steer.disabled=!available||!instruction.can_steer||queueSteering.has(instruction.id);steer.addEventListener('click',async()=>{steer.disabled=true;steer.textContent='Steering…';try{await steerQueued(instruction,selectedData);}catch(error){questionErrors.set(key,error.message);renderQuestions();}});form.append(steer);}
     card.append(form);panel.append(card);update();
   }
@@ -494,7 +520,7 @@ function renderPanels(data){
   const list=document.createElement("dl");for(const [label,value]of fields)list.append(text("dt",label),text("dd",value));details.append(list);
   details.append(text("p","Older chats are grouped using saved project folders when no project ID was recorded. Projects sharing the same folder can contain the same chat.","panel-help"));
   details.append(text("h4","Available here"),text("p","Projects and folders, new local chats, active and archived chats, subagent chats, conversation history, recorded activity, saved patches, and photo messages. Connected chats support direct Send, Steer, and model selection.","panel-help"));
-  details.append(text('h4','Questions for you'),text('p','Assistant questions include the same saved choices and a free-text answer. Replies use the desktop question format and go directly to a connected active chat. When live controls are disconnected, a reply is explicitly queued. A question clears after its reply is recorded. Live approvals have a separate Review panel. Secure macOS dialogs and sign-ins require your Mac.','panel-help'));
+  details.append(text('h4','Questions for you'),text('p','Assistant questions include the same saved choices and a free-text answer. Replies use the desktop question format and go directly to a connected active chat. When live controls are disconnected, a reply is explicitly queued. An acknowledged answer clears its question. Queued and unconfirmed replies show delivery status. Live approvals have a separate Review panel. Secure macOS dialogs and sign-ins require your Mac.','panel-help'));
   details.append(text("h4","Your drafts and privacy"),text("p","Drafts stay with each chat while this page is open, including during a connection outage. Reloading or signing out clears them. Conversation text is read from your Mac; tool output and internal reasoning stay private. Detected credentials are hidden.","panel-help"));
   details.append(text('h4','Live controls'),text('p',data.control?.live?.model_selection?'The shared desktop connection can change this chat’s model for subsequent turns. Steer is available while an accepted active turn is running.':data.control?.live?.reason||'The shared desktop control connection is unavailable.','panel-help'));
   details.append(text('h4','Desktop apps while locked'),text('p',currentStatus?.computer_use?.state==='blocked'?'The last native Chrome test could not unlock the locked Mac, even though Locked Use was installed. Background work and direct message delivery are separate. Tap Mac battery above for the check details.':'Tap Mac battery above to see the last locked-screen desktop-app check.','panel-help'));

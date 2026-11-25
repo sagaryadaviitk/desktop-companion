@@ -151,11 +151,14 @@ class History:
         self.photos = photos
         self.personal_workspaces=[Path(p).resolve() for p in (personal_workspaces if personal_workspaces is not None else [PERSONAL_WORKSPACE,ROOT/'.state/chat-workspace'])]
 
-    def catalog_revision(self,inbox):
+    def catalog_revision(self,inbox,journal=None):
         # SQLite commits touch either the DB or its WAL/journal. Include receipts
         # so another paired browser's Seen action invalidates the catalog too.
         values=[]
-        for path in (self.state,self.history,self.home/'queue_1.sqlite',inbox.path):
+        paths = [self.state, self.history, self.home/'queue_1.sqlite', inbox.path]
+        if journal is not None:
+            paths.append(journal.path)
+        for path in paths:
             for candidate in (path,Path(str(path)+'-wal'),Path(str(path)+'-journal')):
                 try:
                     info=candidate.stat();values.append((info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns))
@@ -227,7 +230,7 @@ class History:
             "project_key": project_keys[0],"project_keys":project_keys,
         }
 
-    def list_threads(self, include_archived=False, include_children=False):
+    def list_threads(self, include_archived=False, include_children=False, journal=None):
         with readonly_db(self.state) as connection:
             roots=self._project_roots(connection)
             metadata=self._thread_metadata_columns(connection)
@@ -266,7 +269,15 @@ class History:
             # A desktop read receipt for an older published turn cannot clear a new reply.
             value['desktop_unread']=True if receipt and receipt[0] else False if receipt and receipt[1] and receipt[1]==(value['last_recorded_turn'] or {}).get('turn_id') else None
             value['model']=redact(row['model'] or '')
-            value['question_count']=len(questions[row['id']])
+            pending = questions[row['id']]
+            if journal is not None and pending:
+                pending = journal.question_status(row['id'], pending)
+            unanswered = [q['id'] for q in pending if q['delivery'] == 'unanswered']
+            if unanswered and row['id'] in queued:
+                desktop_queue = queued_question_answers(self.pending_instructions(row['id']))
+                unanswered = [qid for qid in unanswered if qid not in desktop_queue]
+            value['unanswered_question_ids'] = unanswered
+            value['question_count'] = len(value['unanswered_question_ids'])
             turn=value['last_recorded_turn'] or {}
             value['last_activity_at']=max(row['recency_at_ms'] or 0,value['updated_at'],activity.get(row['id']) or 0,queued.get(row['id']) or 0,(turn.get('started_at') or 0)*1000,(turn.get('completed_at') or 0)*1000)
             result.append(value)
@@ -657,15 +668,42 @@ class CommandJournal:
                 raise ValueError('This command ID was already used for a different instruction.')
             return json.loads(row[1]) if row else None
 
-    def forget_deleted_answer(self, queue_id):
-        # Only a confirmed deletion of its exact queue entry permits a new reply.
-        with self.lock, closing(sqlite3.connect(self.path)) as connection, connection:
-            for identity,raw in connection.execute("SELECT id,result FROM commands WHERE id LIKE 'answer-%'").fetchall():
-                result=json.loads(raw)
-                if result.get('state')=='queued' and result.get('queue_item_id')==queue_id:
-                    connection.execute('DELETE FROM commands WHERE id=?',(identity,))
+    def question_status(self, thread_id, questions):
+        """Project exact, durable answer receipts onto the current desktop questions."""
+        if not questions:
+            return []
+        visible = []
+        # One read snapshot per chat. The committed unknown receipt remains visible
+        # while desktop delivery is in flight, without waiting on the writer lock.
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute('BEGIN')
+            for question in questions:
+                key = answer_identity(thread_id, question)
+                row = db.execute('SELECT result FROM commands WHERE id=?', (key,)).fetchone()
+                result = json.loads(row[0]) if row else {}
+                state = result.get('state')
+                if state in ('sent', 'steered'):
+                    continue
+                delivery = question['delivery']
+                if state and delivery != 'queued':
+                    delivery = state
+                visible.append({**question, 'delivery': delivery})
+        return visible
 
-    def execute(self, command_id, payload, action):
+    @staticmethod
+    def reconcile_queue_answer(connection, queue_id, result):
+        state = result.get('state')
+        if state not in ('deleted', 'steered'):
+            return
+        match = """id LIKE 'answer-%' AND json_extract(result, '$.state')='queued'
+                   AND json_extract(result, '$.queue_item_id')=?"""
+        if state == 'deleted':
+            connection.execute('DELETE FROM commands WHERE ' + match, (queue_id,))
+        else:
+            connection.execute('UPDATE commands SET result=? WHERE ' + match,
+                               (json.dumps(result), queue_id))
+
+    def execute(self, command_id, payload, action, *, reconcile_queue_id=None):
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         with self.lock, closing(sqlite3.connect(self.path)) as connection, connection:
             row = connection.execute("SELECT fingerprint,result FROM commands WHERE id=?", (command_id,)).fetchone()
@@ -685,6 +723,8 @@ class CommandJournal:
                 except ControlError as error:
                     result = {"state": "unknown" if error.uncertain else "rejected", "message": str(error)}
                     if error.retryable and not error.uncertain:result['retryable']=True
+                if reconcile_queue_id is not None:
+                    self.reconcile_queue_answer(connection, reconcile_queue_id, result)
                 connection.execute("UPDATE commands SET result=? WHERE id=?", (json.dumps(result), command_id))
                 connection.commit()
                 return result
@@ -1005,13 +1045,13 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/remote/status" and not self.server.remote:
                 return self.reply(200, {"gateway_port": self.server.gateway_port, "gateway_version": 1, "authentication_required": True, "public_origin": self.server.settings.origin() if self.server.settings else None})
             if parsed.path == "/api/chats":
-                before=self.server.history.catalog_revision(self.server.inbox)
+                before=self.server.history.catalog_revision(self.server.inbox,self.server.journal)
                 if self.headers.get('If-None-Match')=='"'+before+'"':
                     return self.reply(304,b'',"text/plain",extra_headers=[('ETag','"'+before+'"')])
-                chats=self.server.history.list_threads(include_archived=True,include_children=True)
+                chats=self.server.history.list_threads(include_archived=True,include_children=True,journal=self.server.journal)
                 chats=self.server.inbox.decorate(chats)
                 projects=self.server.history.list_projects(chats)
-                after=self.server.history.catalog_revision(self.server.inbox)
+                after=self.server.history.catalog_revision(self.server.inbox,self.server.journal)
                 # If a write raced the snapshot, don't tag it as the newer data.
                 revision=after if before==after else None
                 return self.reply(200, {"chats":chats,"projects":projects,"revision":revision,"scope":"Local desktop history; cloud-only chats and other hosts are not included."},extra_headers=[('ETag','"'+revision+'"')] if revision else [])
@@ -1034,10 +1074,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Invalid history cursor.")
                 value = self.server.history.read_thread(thread_id,before=int(cursor) if cursor is not None else None)
                 value['queue_recovery']=self.server.runtime.queue_recovery(thread_id,redact) if self.server.runtime and hasattr(self.server.runtime,'queue_recovery') else []
-                for question in value['questions']:
-                    attempt=self.server.journal.lookup(answer_identity(thread_id,question))
-                    if attempt and question['delivery']!='queued':
-                        question['delivery']=attempt['state']
+                value['questions'] = self.server.journal.question_status(thread_id, value['questions'])
                 value["control"] = self.server.bridge.describe(thread_id)
                 value['control']['live']=self.server.runtime.capabilities(thread_id) if self.server.runtime and value['control']['available'] and not value['archived'] else {'steer':False,'model_selection':False,'reason':SharedRuntime.REASON}
                 active_questions=value['control']['live'].get('execution',{}).get('async_question_ids')
@@ -1262,8 +1299,7 @@ class Handler(BaseHTTPRequestHandler):
                     except KeyError:raise ControlError('This message is no longer queued. Refresh the chat.')
                     except QueueNotClaimed as error:raise ControlError(str(error),retryable=True) from error
                     except RuntimeUnavailable as error:raise ControlError(str(error),uncertain=True) from error
-                result=self.server.journal.execute(request_id,{'operation':self.path,**payload},change_queue)
-                if result['state']=='deleted':self.server.journal.forget_deleted_answer(identity)
+                result=self.server.journal.execute(request_id,{'operation':self.path,**payload},change_queue,reconcile_queue_id=identity)
                 return self.reply(200 if result['state'] in ('updated','deleted') else 409,result)
             if self.path == '/api/queue/steer':
                 payload=self.read_payload();thread=self.server.history.read_thread(payload['thread_id']);identity=payload.get('queue_id');revision=payload.get('revision');expected=payload.get('expected_turn_id')
@@ -1282,7 +1318,7 @@ class Handler(BaseHTTPRequestHandler):
                     except KeyError:raise ControlError('This message is no longer queued. Check the conversation.')
                     except QueueNotClaimed as error:raise ControlError(str(error),retryable=True) from error
                     except RuntimeUnavailable as error:raise ControlError(str(error),uncertain=True) from error
-                result=self.server.journal.execute(request_id,canonical,promote)
+                result=self.server.journal.execute(request_id,canonical,promote,reconcile_queue_id=identity)
                 return self.reply(200 if result['state']=='steered' else 409,result)
             if self.path == '/api/queue/recovery/dismiss':
                 payload=self.read_payload();thread=self.server.history.read_thread(payload['thread_id']);identity=payload.get('queue_id')

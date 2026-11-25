@@ -115,7 +115,7 @@ def doctor(root=ROOT,*,check_native=True):
 
 def bundle(output,root=ROOT):
     root=Path(root).resolve();output=Path(output).resolve()
-    files=[root/name for name in MODULES]+[root/name for name in ('.gitignore','config.example.json','README.md','SETUP.md','COMPATIBILITY.md','LOCAL_ASSISTANT.md','local-settings.example.json')]
+    files=[root/name for name in MODULES]+[root/name for name in ('.gitignore','config.example.json','README.md','SETUP.md','CODEX-INSTALL.md','COMPATIBILITY.md','LOCAL_ASSISTANT.md','local-settings.example.json')]
     for name in ('.gitattributes','AGENTS.md','CONTRIBUTING.md','.github/workflows/checks.yml'):
         path=root/name
         if path.exists() or path.is_symlink():files.append(path)

@@ -270,8 +270,9 @@ class DesktopClient:
         question_ids=live_question_ids(latest)
         result={'status':'working' if runtime=='active' else 'idle' if runtime=='idle' else 'unknown',
                 'turn_id':turn if runtime=='active' else None,'checked_at':int(time.time()*1000),
-                'approval_count':len([r for r in pending_requests(state) if r.get('params',{}).get('threadId')==thread_id]),'question_count':len(question_ids)}
-        if include_approvals:result['approvals']=approval_views(state,owner,redact);result['async_question_ids']=question_ids
+                'approval_count':len([r for r in pending_requests(state) if r.get('params',{}).get('threadId')==thread_id]),'question_count':len(question_ids),
+                'async_question_ids':question_ids}
+        if include_approvals:result['approvals']=approval_views(state,owner,redact)
         return result
 
     def __enter__(self):return self
