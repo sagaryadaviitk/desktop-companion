@@ -27,7 +27,7 @@ let questionSignature='';
 const queueSteering=new Set();
 const photoDrafts=new Map(),photoUploads=new Map();
 let resultTimer=null;
-let newChatFlow=null,healthFlow=null,queueUI=null,connectingChat=false,renamingChat=false;
+let newChatFlow=null,healthFlow=null,queueUI=null,connectingChat=false,followDesktopSelection=false,renamingChat=false;
 function showCommandResult(message,temporary=false){clearTimeout(resultTimer);el("command-result").textContent=message;if(temporary)resultTimer=setTimeout(()=>{if(el("command-result").textContent===message)el("command-result").textContent="";},7000);}
 const mobile=()=>window.matchMedia("(max-width:760px)").matches;
 const recordedLabels={inProgress:"Working now",completed:"Completed",interrupted:"Interrupted",failed:"Failed"};
@@ -62,6 +62,7 @@ async function api(path, options = {}) {
 
 function lockScreen(){
   localEntry.reset();
+  followDesktopSelection=false;connectingChat=false;
   authVersion++;selectionVersion++;deliveryReceipts.reset();chatRefreshPromise=null;connected=false;currentStatus=null;chatSignature="";pendingSignature="";commandAttempts.clear();
   inboxView="recent";homeSignature="";deliveryMode="queue";readAcknowledgements.clear();modelAttempts.clear();
   displayedRevision=null;readRequests.clear();refreshPromise=null;cancelAnimationFrame(readFrame);el('pull-refresh').hidden=true;
@@ -185,7 +186,7 @@ function chatCard(chat,home=false){
   if(chat.unread){const newTag=document.createElement('span');newTag.className='new-tag';newTag.textContent='Unread';tags.append(newTag);}
   if(approvalCount(chat)){const approval=document.createElement('span');approval.className='approval-tag';approval.textContent=`${approvalCount(chat)} live request${approvalCount(chat)===1?'':'s'}`;tags.prepend(approval);}
   if(questionCount(chat)){const reply=document.createElement('span');reply.className='reply-tag';reply.textContent=`${questionCount(chat)} question${questionCount(chat)===1?'':'s'}`;tags.prepend(reply);}
-  button.append(headingRow,preview,meta,tags);button.addEventListener('click',()=>selectChat(chat.id));return button;
+  button.append(headingRow,preview,meta,tags);button.addEventListener('click',()=>openSelectedChat(chat.id));return button;
 }
 
 function chooseInbox(view){inboxView=view;el('chat-filter').value=view==='working'?'working':'active';goHome();renderChats();renderHome();}
@@ -529,6 +530,15 @@ function renderPanels(data){
   for(const [id,position]of positions)el(id).scrollTop=position;
 }
 
+async function openSelectedChat(id){
+  const opening=selected!==id||document.body.classList.contains('home-open');
+  const load=selectChat(id),version=selectionVersion,session=authVersion;
+  if(await load!==true||!opening||!followDesktopSelection||version!==selectionVersion||session!==authVersion)return;
+  if(selected!==id||document.body.classList.contains('home-open')||!connected||!selectedData?.control?.available||selectedData.archived)return;
+  const live=selectedData.control.live;
+  if(!live?.connected&&!live?.model_selection)await connectChat();
+}
+
 async function selectChat(id,navigate=true) {
   if(el('approvals-dialog').open)el('approvals-dialog').close();el('approvals-banner').hidden=true;
   const reopening=document.body.classList.contains('home-open');
@@ -540,7 +550,7 @@ async function selectChat(id,navigate=true) {
   }
   document.body.classList.remove('home-open');el('home-screen').hidden=true;
   if(id===selected&&selectedData){document.activeElement?.blur();document.body.classList.add("chat-open");if(reopening){conversationNeedsScroll=true;conversationScroll.open();jumpLatest();}renderQuestions();updateComposer();return refreshChat();}
-  document.activeElement?.blur();selectionVersion++;
+  document.activeElement?.blur();selectionVersion++;connectingChat=false;
   selected=id;conversationRevision=''; conversationScroll.open();selectedData=null;displayedRevision=null;deliveryMode='queue'; lastSignature="";panelSignature="";pendingSignature="";conversationNeedsScroll=true; messageMap.clear();nextBefore=null;loadedEarlier=false;loadingEarlier=false;el("command-result").textContent="";
   el("instruction").value=drafts.get(id)||"";
   el("instruction").disabled=true; el("send").disabled=true;
@@ -677,6 +687,8 @@ async function readCurrentChat() {
       for(const recovery of data.queue_recovery||[]){const card=document.createElement('details');card.className='queue-recovery';const title=document.createElement('summary');title.textContent=recovery.title||'Delivery needs review';const note=document.createElement('p');note.textContent=recovery.message;const text=document.createElement('p');text.className='pending-text';text.textContent=recovery.text;const actions=document.createElement('div');actions.className='recovery-actions';const button=document.createElement('button');button.type='button';button.className='quiet-button';button.textContent='Copy to draft';button.addEventListener('click',()=>{if(((drafts.get(data.id)||'').trim()||(photoDrafts.get(data.id)||[]).length)&&!window.confirm('Replace the current draft and photos with this saved queue version?'))return;drafts.set(data.id,recovery.text);photoDrafts.set(data.id,recovery.photos||[]);el('instruction').value=recovery.text;showCommandResult('Review the conversation before sending this text again.');updateComposer();});const dismiss=document.createElement('button');dismiss.type='button';dismiss.className='quiet-button';dismiss.textContent='Dismiss';dismiss.addEventListener('click',async()=>{dismiss.disabled=true;try{await api('/api/queue/recovery/dismiss',{method:'POST',headers:{'Content-Type':'application/json','X-Companion-CSRF':csrf},body:JSON.stringify({thread_id:data.id,queue_id:recovery.id})});pendingSignature='';await refreshChat();}catch(error){dismiss.disabled=false;showCommandResult(error.message);}});actions.append(button,dismiss);card.append(title,note,text,actions);if(recovery.confirmed){if(!savedVersions){savedVersions=document.createElement('details');savedVersions.className='queue-recovery queue-versions';const heading=document.createElement('summary');heading.textContent='Previous queue versions';savedVersions.append(heading);el('pending').append(savedVersions);}savedVersions.append(card);}else el('pending').append(card);}
 
     }
+    // Provisional messages are replaced by each fresh snapshot or their indexed copy.
+    for(const [id,message] of messageMap)if(message.unindexed)messageMap.delete(id);
     for(const message of data.messages)messageMap.set(message.id,message);
     if(!loadedEarlier)nextBefore=data.next_before??null;
     renderMessages();
@@ -855,10 +867,11 @@ el("composer").addEventListener("submit",async event=>{
   }catch(error){attempt.retrying=true;const rejected=error.result?.state==='rejected'||error.status>=400&&error.status<500&&error.result?.state!=='unknown'&&error.status!==429;if(rejected)commandAttempts.delete(target);deliveryReceipts.remove(attempt.id);if(version===authVersion&&selected===target)el("command-result").textContent=rejected?`${error.message} Your draft is kept. Refresh and send again when ready.`:`${error.message} Your draft is kept. Check ${mode==='queue'?'the queued follow-ups':'the desktop conversation'} before retrying; an unchanged retry uses the same request ID.`;}
   finally{sending=false;if(version===authVersion){renderMessages();updateComposer();await refreshChat(true);}}
 });
-el('connect-chat').addEventListener('click',async()=>{
+el('connect-chat').addEventListener('click',()=>connectChat());
+async function connectChat(){
   if(connectingChat||!selected)return;
   const target=selected,version=authVersion,selection=selectionVersion;
-  const isCurrent=()=>target===selected&&version===authVersion&&selection===selectionVersion;
+  const isCurrent=()=>target===selected&&version===authVersion&&selection===selectionVersion&&!document.body.classList.contains('home-open');
   connectingChat=true;updateComposer();
   try{
     // Opening is requested exactly once. Its acknowledgement is not proof that
@@ -869,11 +882,14 @@ el('connect-chat').addEventListener('click',async()=>{
     const outcome=await CompanionConversation.waitForConnection({read:()=>refreshChat(true),isCurrent,retryAfter:()=>Math.max(0,readRetryAt-Date.now()),
       isConnected:()=>selectedData?.control?.live?.connected===true||selectedData?.control?.live?.model_selection===true});
     if(!isCurrent())return;
-    if(outcome==='connected')showCommandResult('Connected to desktop.',true);
+    if(outcome==='connected'){
+      followDesktopSelection=true;
+      showCommandResult('Connected to desktop.',true);
+    }
     else if(outcome==='timeout')showCommandResult('The chat was opened, but its live connection could not be confirmed. Check the chat on your Mac, then try Connect again. Your draft is kept.');
   }catch(error){if(isCurrent())showCommandResult(error.message);}
-  finally{connectingChat=false;updateComposer();}
-});
+  finally{if(version===authVersion&&selection===selectionVersion){connectingChat=false;updateComposer();}}
+}
 if(window.CompanionUpdates)updater=CompanionUpdates.install({loadedBuild,hasDraft:hasUnsentDraft,isBusy:()=>photoStorageBusy||approvalUI?.busy()||sending||deliveryReceipts.hasPending()||photoUploads.size>0||questionBusy.size>0||queueUI?.isBusy()||modelSaving||renamingChat||newChatFlow?.isBusy()||connectingChat,isInteracting:()=>Boolean(document.querySelector('dialog[open]'))||document.activeElement?.matches('input,textarea,select'),onBusy:()=>{const message='Wait for the current operation to finish before reloading.';if(el('account-dialog').open)el('reload-result').textContent=message;else if(document.body.classList.contains('home-open')||!selected)showNotice(message);else showCommandResult(message);}});
 el('app-reload').addEventListener('click',()=>updater?.reload());
 window.addEventListener('pageshow',event=>{if(event.persisted&&!document.body.classList.contains('signed-out'))refreshAll(true);});

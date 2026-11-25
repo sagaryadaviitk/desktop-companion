@@ -257,13 +257,14 @@ class DesktopClient:
             try:follow(False)
             except OSError:pass
 
-    def execution_state(self,thread_id,owner,include_approvals=False,redact=str):
+    def execution_state(self,thread_id,owner,include_approvals=False,redact=str,on_transcript=None):
         state=self.conversation_state(thread_id,owner)
         runtime=state.get('threadRuntimeStatus',{}).get('type')
         if runtime not in ('active','idle','notLoaded','systemError'):raise RuntimeUnavailable('Desktop execution status is unavailable.')
         turns=state.get('turns',[])
         history=state.get('turnHistory') or {}
         if history.get('kind')=='canonical':turns=list(history.get('history',{}).get('entitiesByKey',{}).values())
+        if on_transcript is not None:on_transcript(turns)
         active=[t for t in turns if isinstance(t,dict) and t.get('status')=='inProgress' and t.get('turnId')]
         turn=max(active,key=lambda t:t.get('turnStartedAtMs') or 0,default={}).get('turnId')
         latest=max(enumerate(turns),key=lambda pair:(pair[1].get('turnStartedAtMs') or 0,pair[0]),default=(0,{}))[1]
@@ -319,7 +320,7 @@ class DesktopRuntime:
             raise RuntimeUnavailable('This chat is not loaded in the desktop. Open it on your Mac first.')
         return owner, settings
 
-    def observe_execution(self,client,thread_id,owner,include_approvals=False):
+    def observe_execution(self,client,thread_id,owner,include_approvals=False,on_transcript=None):
         # A large history must not be re-serialized by the desktop on every
         # phone poll. This cooldown applies only to reads, never action preflight.
         key=(thread_id,owner)
@@ -328,7 +329,8 @@ class DesktopRuntime:
                 raise DesktopSnapshotTooLarge('Desktop state exceeded the supported size.')
             self.large_snapshots.pop(key,None)
         try:
-            return client.execution_state(thread_id,owner,include_approvals=include_approvals,redact=self.approval_redactor)
+            return client.execution_state(thread_id,owner,include_approvals=include_approvals,redact=self.approval_redactor,
+                                          **({'on_transcript':on_transcript} if on_transcript is not None else {}))
         except DesktopSnapshotTooLarge:
             with self.observation_lock:
                 self.large_snapshots[key]=self.observation_clock()+30
@@ -336,7 +338,7 @@ class DesktopRuntime:
                 while len(self.large_snapshots)>64:self.large_snapshots.popitem(last=False)
             raise
 
-    def capabilities(self, thread_id):
+    def capabilities(self, thread_id, *, on_transcript=None):
         value = {'steer': False, 'send_now': False, 'model_selection': False, 'connected':False, 'reason': self.REASON}
         try:
             with self.client(timeout=2) as client:
@@ -346,7 +348,7 @@ class DesktopRuntime:
                 value.update(connected=True,model_selection=True,model=settings.get('model'),effort=settings.get('reasoningEffort'),
                              model_reason='Connected. Model and reasoning changes apply to subsequent turns in this chat.',reason='Connected to the desktop chat.')
                 try:
-                    execution=self.observe_execution(client,thread_id,owner,include_approvals=True)
+                    execution=self.observe_execution(client,thread_id,owner,include_approvals=True,on_transcript=on_transcript)
                 except (OSError,ValueError,KeyError,TypeError,AttributeError,RuntimeUnavailable) as error:
                     reason=('The live activity snapshot is too large to check here.' if isinstance(error,DesktopSnapshotTooLarge)
                             else 'Live activity is temporarily unavailable.')
