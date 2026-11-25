@@ -335,7 +335,8 @@ function renderQuestions(){
   banner.hidden=!selected||!questions.length||document.body.classList.contains('home-open');
   const unanswered=questions.filter(q=>q.delivery==='unanswered').length,queued=questions.filter(q=>q.delivery==='queued').length;
   el('questions-summary').textContent=unanswered?`${unanswered} question${unanswered===1?'':'s'} for you`:queued?`${queued} repl${queued===1?'y':'ies'} queued`:'Reply delivery status';
-  banner.querySelector('strong').textContent=unanswered?'View & reply →':'View status →';
+  const actionLabel=el('questions-action');
+  if(actionLabel)actionLabel.textContent=unanswered?'View & reply →':'View status →';
   banner.dataset.state=questions.some(q=>q.delivery==='unknown')?'warning':'normal';
   if(!el('questions-dialog').open)return;
   const available=Boolean(connected&&selectedData?.control?.available&&!selectedData.archived);
